@@ -62,7 +62,7 @@ app.get('/scrape', async (req, res) => {
   if (!url && !searchUrl) return res.status(400).json({ error: 'url or searchUrl required' });
 
   let browser;
-  const timeoutMs = 35000;
+  const timeoutMs = 60000;
   const timer = setTimeout(async () => {
     if (browser) await browser.close().catch(() => {});
     if (!res.headersSent) res.status(504).json({ error: 'timeout', urls: [] });
@@ -90,7 +90,12 @@ app.get('/scrape', async (req, res) => {
 
     if (searchUrl) {
       console.log(`[search] navigating to: ${searchUrl}`);
-      await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 12000 });
+      await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 20000 });
+      // Wait for Cloudflare challenge to resolve if present
+      await page.waitForFunction(
+        () => !document.title.toLowerCase().includes('just a moment'),
+        { timeout: 15000 }
+      ).catch(() => {});
       // Wait for result links to appear (React SPAs load results via AJAX after domcontentloaded)
       const resultSelector = sectionFilter
         ? `a[href*="${sectionFilter}"]`
@@ -132,10 +137,15 @@ app.get('/scrape', async (req, res) => {
       } else {
         console.log(`[search] found page: ${targetUrl}`);
       }
-      await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 12000 });
+      await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 20000 });
     } else {
-      await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 12000 });
+      await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 20000 });
     }
+    // Wait for Cloudflare challenge to resolve if present
+    await page.waitForFunction(
+      () => !document.title.toLowerCase().includes('just a moment'),
+      { timeout: 20000 }
+    ).catch(() => {});
 
     // Intercept network responses to catch player URLs from AJAX calls
     const networkUrls = new Set();
@@ -164,7 +174,7 @@ app.get('/scrape', async (req, res) => {
       await tryClickEpisode(page, season, episode);
     }
 
-    await page.waitForTimeout(3000);
+    await page.waitForTimeout(1500);
 
     const urls = new Set();
 
