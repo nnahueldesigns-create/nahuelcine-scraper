@@ -22,8 +22,39 @@ function extractFromHtml(html) {
 
 const langOrder = u => /[#&]lang=LAT/i.test(u) ? 0 : /[#&]lang=VOS/i.test(u) ? 1 : /[#&]lang=SUB/i.test(u) ? 2 : 3;
 
+async function tryClickEpisode(page, season, episode) {
+  const s = parseInt(season);
+  const e = parseInt(episode);
+  const ePad = String(e).padStart(2, '0');
+  const sPad = String(s).padStart(2, '0');
+
+  const selectors = [
+    `a[href*="${s}x${e}"]:not([href*="${s}x${e}0"])`,
+    `a[href*="${s}x${ePad}"]`,
+    `a[href*="s${sPad}e${ePad}"]`,
+    `a[href*="temporada/${s}/episodio/${e}"]`,
+    `a[href*="temporada-${s}"][href*="episodio-${e}"]`,
+    `a[href*="temporada-${s}"][href*="episodio-0${e}"]`,
+    `a[href*="capitulo-${e}"]`,
+  ];
+
+  for (const sel of selectors) {
+    try {
+      const el = await page.$(sel);
+      if (el) {
+        const href = await el.getAttribute('href');
+        console.log(`[ep-nav] clicking: ${href}`);
+        await el.click();
+        await page.waitForTimeout(3000);
+        return true;
+      }
+    } catch {}
+  }
+  return false;
+}
+
 app.get('/scrape', async (req, res) => {
-  const { url } = req.query;
+  const { url, season, episode } = req.query;
   if (!url) return res.status(400).json({ error: 'url required' });
 
   let browser;
@@ -36,6 +67,12 @@ app.get('/scrape', async (req, res) => {
     browser = await chromium.launch({ headless: true });
     const page = await browser.newPage();
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 12000 });
+
+    if (season && episode) {
+      await page.waitForTimeout(2000);
+      await tryClickEpisode(page, season, episode);
+    }
+
     await page.waitForTimeout(4000);
 
     const urls = new Set();
