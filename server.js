@@ -177,15 +177,28 @@ app.get('/scrape', async (req, res) => {
       if (src && PLAYER_DOMAINS.some(d => src.includes(d))) urls.add(src);
     }
 
-    // Check data-server attributes (e.g. Cuevana uses <li data-server="..."> for player selection)
-    const dataServers = await page.evaluate(() =>
-      [...document.querySelectorAll('[data-server]')].map(el => el.getAttribute('data-server') || '')
-    );
-    for (const src of dataServers) {
-      if (!src || !PLAYER_DOMAINS.some(d => src.includes(d))) continue;
-      // Skip video.cuevana.cz ?token= URLs — they are session tokens, not movie-specific
-      if (src.includes('video.cuevana.cz') && src.includes('?token=')) continue;
-      urls.add(src);
+    // Cuevana: click each [data-server*="video.cuevana.cz"] button so the player loads
+    // inside cuevana.cz context — video.cuevana.cz then requests filemoon/streamtape/etc.
+    // which the network interceptor captures. Direct video.cuevana.cz embeds are blocked
+    // by X-Frame-Options/CSP when used outside cuevana.cz.
+    const cuevanaServerEls = await page.$$('[data-server*="video.cuevana.cz"]:not([data-server*="?token="])');
+    if (cuevanaServerEls.length > 0) {
+      console.log(`[cuevana] clicking ${cuevanaServerEls.length} server button(s) for inner player URLs`);
+      for (const el of cuevanaServerEls) {
+        try {
+          await el.click();
+          await page.waitForTimeout(4000);
+        } catch {}
+      }
+    } else {
+      // Fallback: read data-server attrs directly (non-cuevana players)
+      const dataServers = await page.evaluate(() =>
+        [...document.querySelectorAll('[data-server]')].map(el => el.getAttribute('data-server') || '')
+      );
+      for (const src of dataServers) {
+        if (!src || !PLAYER_DOMAINS.some(d => src.includes(d))) continue;
+        urls.add(src);
+      }
     }
 
     // If no player iframes yet, wait up to 5s more for dynamic JS to create them (e.g. Gnula/smin2.js)
