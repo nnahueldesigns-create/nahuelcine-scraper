@@ -120,7 +120,13 @@ app.get('/scrape', async (req, res) => {
       }
 
       targetUrl = foundLink;
-      console.log(`[search] found page: ${targetUrl}`);
+      // For Cuevana TV: episode pages live at /{slug}/{season}/{episode}/ — go directly
+      if (season && episode && /\/serie\//.test(targetUrl)) {
+        targetUrl = targetUrl.replace(/\/+$/, '') + `/${season}/${episode}/`;
+        console.log(`[search] episode URL: ${targetUrl}`);
+      } else {
+        console.log(`[search] found page: ${targetUrl}`);
+      }
       await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 12000 });
     } else {
       await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 12000 });
