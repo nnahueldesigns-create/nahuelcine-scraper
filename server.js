@@ -54,19 +54,46 @@ async function tryClickEpisode(page, season, episode) {
 }
 
 app.get('/scrape', async (req, res) => {
-  const { url, season, episode } = req.query;
-  if (!url) return res.status(400).json({ error: 'url required' });
+  const { url, season, episode, searchUrl, sectionFilter } = req.query;
+  if (!url && !searchUrl) return res.status(400).json({ error: 'url or searchUrl required' });
 
   let browser;
+  const timeoutMs = searchUrl ? 30000 : 15000;
   const timer = setTimeout(async () => {
     if (browser) await browser.close().catch(() => {});
     if (!res.headersSent) res.status(504).json({ error: 'timeout', urls: [] });
-  }, 15000);
+  }, timeoutMs);
 
   try {
     browser = await chromium.launch({ headless: true });
     const page = await browser.newPage();
-    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 12000 });
+
+    let targetUrl = url;
+
+    if (searchUrl) {
+      console.log(`[search] navigating to: ${searchUrl}`);
+      await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 12000 });
+      await page.waitForTimeout(3000);
+
+      const filter = sectionFilter || '';
+      const foundLink = await page.evaluate((f) => {
+        const link = [...document.querySelectorAll('a[href]')].find(a => f ? a.href.includes(f) : false);
+        return link ? link.href : null;
+      }, filter);
+
+      if (!foundLink) {
+        console.warn(`[search] no link found matching: ${filter}`);
+        clearTimeout(timer);
+        await browser.close();
+        return res.json({ urls: [] });
+      }
+
+      targetUrl = foundLink;
+      console.log(`[search] found page: ${targetUrl}`);
+      await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 12000 });
+    } else {
+      await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 12000 });
+    }
 
     if (season && episode) {
       await page.waitForTimeout(2000);
