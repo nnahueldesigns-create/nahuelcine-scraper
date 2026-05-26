@@ -8,8 +8,8 @@ app.use(cors());
 const PORT = process.env.PORT || 3000;
 
 const PLAYER_DOMAINS = [
-  'streamtape', 'dood', 'filemoon', 'voe', 'streamz',
-  'jawcloud', 'streamwish', 'links.cuevana.ac', 'player.cuevana.ac',
+  'streamtape', 'dood', 'filemoon', 'voe',
+  'streamwish', 'links.cuevana.ac', 'player.cuevana.ac',
   'vidfast', 'mp4upload', 'uqload', 'upstream',
   'fembed', 'vidbom', 'embed.su', 'player.cuevana',
   'ok.ru', 'vidlox', 'mixdrop', 'netu',
@@ -17,7 +17,7 @@ const PLAYER_DOMAINS = [
   'video.cuevana.cz',
 ];
 
-const PLAYER_REGEX = /['"](https?:\/\/(?:(?:streamtape|dood|filemoon|voe|streamz|jawcloud|streamwish|links\.cuevana\.ac|player\.cuevana\.ac|vidfast|mp4upload|uqload|upstream|fembed|vidbom|embed\.su|player\.cuevana|ok\.ru|vidlox|mixdrop|netu|videobin|vidmoly|vudeo|wishfast|streamvid|video\.cuevana\.cz)[^'"<>\s]+))['"]/gi;
+const PLAYER_REGEX = /['"](https?:\/\/(?:(?:streamtape|dood|filemoon|voe|streamwish|links\.cuevana\.ac|player\.cuevana\.ac|vidfast|mp4upload|uqload|upstream|fembed|vidbom|embed\.su|player\.cuevana|ok\.ru|vidlox|mixdrop|netu|videobin|vidmoly|vudeo|wishfast|streamvid|video\.cuevana\.cz)[^'"<>\s]+))['"]/gi;
 
 function extractFromHtml(html) {
   const urls = new Set();
