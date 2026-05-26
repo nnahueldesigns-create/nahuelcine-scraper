@@ -75,14 +75,29 @@ app.get('/scrape', async (req, res) => {
       await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 12000 });
       await page.waitForTimeout(3000);
 
-      const filter = sectionFilter || '';
-      const foundLink = await page.evaluate((f) => {
-        const link = [...document.querySelectorAll('a[href]')].find(a => f ? a.href.includes(f) : false);
-        return link ? link.href : null;
-      }, filter);
+      const filter    = sectionFilter || '';
+      const titleSlug = (req.query.titleSlug || '').toLowerCase();
+      const slugWords = titleSlug.split('-').filter(w => w.length > 2);
+
+      const foundLink = await page.evaluate((f, words) => {
+        const links = [...document.querySelectorAll('a[href]')]
+          .filter(a => f ? a.href.includes(f) : true);
+
+        if (!words.length) return links[0]?.href || null;
+
+        // Score each link by how many title words appear in its URL
+        let best = null, bestScore = 0;
+        for (const a of links) {
+          const href = a.href.toLowerCase();
+          const score = words.filter(w => href.includes(w)).length;
+          if (score > bestScore) { bestScore = score; best = a.href; }
+        }
+        // Require at least 1 word match to avoid returning a wrong movie
+        return bestScore > 0 ? best : null;
+      }, filter, slugWords);
 
       if (!foundLink) {
-        console.warn(`[search] no link found matching: ${filter}`);
+        console.warn(`[search] no matching link for slug: ${titleSlug}`);
         clearTimeout(timer);
         await browser.close();
         return res.json({ urls: [] });
