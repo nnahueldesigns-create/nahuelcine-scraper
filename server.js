@@ -172,7 +172,10 @@ app.get('/scrape', async (req, res) => {
       [...document.querySelectorAll('[data-server]')].map(el => el.getAttribute('data-server') || '')
     );
     for (const src of dataServers) {
-      if (src && PLAYER_DOMAINS.some(d => src.includes(d))) urls.add(src);
+      if (!src || !PLAYER_DOMAINS.some(d => src.includes(d))) continue;
+      // Skip video.cuevana.cz ?token= URLs — they are session tokens, not movie-specific
+      if (src.includes('video.cuevana.cz') && src.includes('?token=')) continue;
+      urls.add(src);
     }
 
     // If no player iframes yet, wait up to 5s more for dynamic JS to create them (e.g. Gnula/smin2.js)
