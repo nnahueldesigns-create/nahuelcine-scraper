@@ -127,6 +127,28 @@ app.get('/scrape', async (req, res) => {
       await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 12000 });
     }
 
+    // Intercept network responses to catch player URLs from AJAX calls
+    const networkUrls = new Set();
+    page.on('response', async (response) => {
+      try {
+        const resUrl = response.url();
+        // If the response URL itself is a player domain, capture it
+        if (PLAYER_DOMAINS.some(d => resUrl.includes(d))) {
+          networkUrls.add(resUrl);
+          return;
+        }
+        // Check text responses for embedded player URLs (e.g. admin-ajax.php returning HTML with iframe)
+        const ct = response.headers()['content-type'] || '';
+        if (ct.includes('json') || ct.includes('text/html') || ct.includes('text/plain')) {
+          const text = await response.text().catch(() => '');
+          for (const m of text.matchAll(PLAYER_REGEX)) {
+            const u = m[1];
+            if (!/\.js(\?|$)/.test(u) && !/\.css(\?|$)/.test(u)) networkUrls.add(u);
+          }
+        }
+      } catch {}
+    });
+
     if (season && episode) {
       await page.waitForTimeout(2000);
       await tryClickEpisode(page, season, episode);
@@ -167,6 +189,9 @@ app.get('/scrape', async (req, res) => {
         if (src && PLAYER_DOMAINS.some(d => src.includes(d))) urls.add(src);
       }
     }
+
+    // Add any player URLs captured from network responses
+    for (const u of networkUrls) urls.add(u);
 
     if (!urls.size) {
       const html = await page.content();
