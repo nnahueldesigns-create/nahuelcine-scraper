@@ -16,6 +16,8 @@ const PLAYER_DOMAINS = [
   'video.cuevana.cz',
 ];
 
+const INNER_PLAYER_DOMAINS = PLAYER_DOMAINS.filter(d => d !== 'video.cuevana.cz');
+
 const PLAYER_REGEX = /['"](https?:\/\/(?:(?:streamtape|filemoon|voe|vidfast|mp4upload|uqload|upstream|fembed|vidbom|embed\.su|ok\.ru|vidlox|netu|videobin|vidmoly|vudeo|wishfast|streamvid|video\.cuevana\.cz)[^'"<>\s]+))['"]/gi;
 
 function extractFromHtml(html) {
@@ -86,6 +88,28 @@ app.get('/scrape', async (req, res) => {
       Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
     });
 
+    // Set up network interceptor BEFORE any navigation so we capture everything
+    const networkUrls = new Set();
+    page.on('response', async (response) => {
+      try {
+        const resUrl = response.url();
+        // Capture inner player domain responses (not video.cuevana.cz itself)
+        if (INNER_PLAYER_DOMAINS.some(d => resUrl.includes(d))) {
+          networkUrls.add(resUrl);
+          return;
+        }
+        // Also capture video.cuevana.cz responses but scan their content for inner URLs
+        const ct = response.headers()['content-type'] || '';
+        if (ct.includes('json') || ct.includes('text/html') || ct.includes('text/plain')) {
+          const text = await response.text().catch(() => '');
+          for (const m of text.matchAll(PLAYER_REGEX)) {
+            const u = m[1];
+            if (!/\.js(\?|$)/.test(u) && !/\.css(\?|$)/.test(u)) networkUrls.add(u);
+          }
+        }
+      } catch {}
+    });
+
     let targetUrl = url;
 
     if (searchUrl) {
@@ -141,36 +165,18 @@ app.get('/scrape', async (req, res) => {
     } else {
       await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 20000 });
     }
+
     // Wait for Cloudflare challenge to resolve if present
     await page.waitForFunction(
       () => !document.title.toLowerCase().includes('just a moment'),
       { timeout: 20000 }
     ).catch(() => {});
 
-    // Intercept network responses to catch player URLs from AJAX calls
-    const networkUrls = new Set();
-    page.on('response', async (response) => {
-      try {
-        const resUrl = response.url();
-        // If the response URL itself is a player domain, capture it
-        if (PLAYER_DOMAINS.some(d => resUrl.includes(d))) {
-          networkUrls.add(resUrl);
-          return;
-        }
-        // Check text responses for embedded player URLs (e.g. admin-ajax.php returning HTML with iframe)
-        const ct = response.headers()['content-type'] || '';
-        if (ct.includes('json') || ct.includes('text/html') || ct.includes('text/plain')) {
-          const text = await response.text().catch(() => '');
-          for (const m of text.matchAll(PLAYER_REGEX)) {
-            const u = m[1];
-            if (!/\.js(\?|$)/.test(u) && !/\.css(\?|$)/.test(u)) networkUrls.add(u);
-          }
-        }
-      } catch {}
-    });
+    // Wait for page content to render (React SPAs need JS execution after CF)
+    await page.waitForSelector('[data-server], iframe[src]', { timeout: 6000 }).catch(() => {});
 
     if (season && episode) {
-      await page.waitForTimeout(2000);
+      await page.waitForTimeout(1000);
       await tryClickEpisode(page, season, episode);
     }
 
@@ -187,24 +193,23 @@ app.get('/scrape', async (req, res) => {
       if (src && PLAYER_DOMAINS.some(d => src.includes(d))) urls.add(src);
     }
 
-    // Cuevana: click each [data-server*="video.cuevana.cz"] button so the player loads
-    // inside cuevana.cz context — video.cuevana.cz then requests filemoon/streamtape/etc.
-    // which the network interceptor captures. Direct video.cuevana.cz embeds are blocked
-    // by X-Frame-Options/CSP when used outside cuevana.cz.
-    const cuevanaServerEls = await page.$$('[data-server*="video.cuevana.cz"]:not([data-server*="?token="])');
+    // Click ALL [data-server*="video.cuevana.cz"] buttons so the player loads inside
+    // cuevana.cz context — network interceptor captures inner filemoon/streamtape/etc. URLs
+    const cuevanaServerEls = await page.$$('[data-server*="video.cuevana.cz"]');
     if (cuevanaServerEls.length > 0) {
-      // Click up to 3 buttons; 2.5s each keeps total well under timeout
       const toClick = cuevanaServerEls.slice(0, 3);
-      console.log(`[cuevana] clicking ${toClick.length}/${cuevanaServerEls.length} server button(s) for inner player URLs`);
+      console.log(`[cuevana] clicking ${toClick.length}/${cuevanaServerEls.length} server button(s)`);
       for (const el of toClick) {
         try {
           await el.click();
           await page.waitForTimeout(2500);
         } catch {}
-        if (networkUrls.size > 0) break; // got a player URL, stop clicking
+        // Stop early if we already captured inner player URLs (not video.cuevana.cz)
+        const innerFound = [...networkUrls].some(u => INNER_PLAYER_DOMAINS.some(d => u.includes(d)));
+        if (innerFound) break;
       }
     } else {
-      // Fallback: read data-server attrs directly (non-cuevana players)
+      // Fallback: read data-server attrs directly (non-cuevana players like Gnula)
       const dataServers = await page.evaluate(() =>
         [...document.querySelectorAll('[data-server]')].map(el => el.getAttribute('data-server') || '')
       );
@@ -230,7 +235,10 @@ app.get('/scrape', async (req, res) => {
     }
 
     // Add any player URLs captured from network responses
-    for (const u of networkUrls) urls.add(u);
+    // Prefer inner player URLs over video.cuevana.cz URLs
+    const innerNetworkUrls = [...networkUrls].filter(u => INNER_PLAYER_DOMAINS.some(d => u.includes(d)));
+    const cuevanaNetworkUrls = [...networkUrls].filter(u => u.includes('video.cuevana.cz'));
+    for (const u of (innerNetworkUrls.length ? innerNetworkUrls : cuevanaNetworkUrls)) urls.add(u);
 
     if (!urls.size) {
       const html = await page.content();
@@ -239,6 +247,7 @@ app.get('/scrape', async (req, res) => {
       }
     }
 
+    console.log(`[scrape] done: ${urls.size} URL(s) for ${targetUrl}`);
     clearTimeout(timer);
     await browser.close();
 
