@@ -62,7 +62,7 @@ app.get('/scrape', async (req, res) => {
   if (!url && !searchUrl) return res.status(400).json({ error: 'url or searchUrl required' });
 
   let browser;
-  const timeoutMs = searchUrl ? 35000 : 25000;
+  const timeoutMs = 35000;
   const timer = setTimeout(async () => {
     if (browser) await browser.close().catch(() => {});
     if (!res.headersSent) res.status(504).json({ error: 'timeout', urls: [] });
@@ -183,12 +183,15 @@ app.get('/scrape', async (req, res) => {
     // by X-Frame-Options/CSP when used outside cuevana.cz.
     const cuevanaServerEls = await page.$$('[data-server*="video.cuevana.cz"]:not([data-server*="?token="])');
     if (cuevanaServerEls.length > 0) {
-      console.log(`[cuevana] clicking ${cuevanaServerEls.length} server button(s) for inner player URLs`);
-      for (const el of cuevanaServerEls) {
+      // Click up to 3 buttons; 2.5s each keeps total well under timeout
+      const toClick = cuevanaServerEls.slice(0, 3);
+      console.log(`[cuevana] clicking ${toClick.length}/${cuevanaServerEls.length} server button(s) for inner player URLs`);
+      for (const el of toClick) {
         try {
           await el.click();
-          await page.waitForTimeout(4000);
+          await page.waitForTimeout(2500);
         } catch {}
+        if (networkUrls.size > 0) break; // got a player URL, stop clicking
       }
     } else {
       // Fallback: read data-server attrs directly (non-cuevana players)
