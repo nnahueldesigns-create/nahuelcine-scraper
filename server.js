@@ -91,7 +91,12 @@ app.get('/scrape', async (req, res) => {
     if (searchUrl) {
       console.log(`[search] navigating to: ${searchUrl}`);
       await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 12000 });
-      await page.waitForTimeout(3000);
+      // Wait for result links to appear (React SPAs load results via AJAX after domcontentloaded)
+      const resultSelector = sectionFilter
+        ? `a[href*="${sectionFilter}"]`
+        : 'a[href*="/pelicula/"], a[href*="/serie/"]';
+      await page.waitForSelector(resultSelector, { timeout: 8000 }).catch(() => {});
+      await page.waitForTimeout(500);
 
       const filter    = sectionFilter || '';
       const titleSlug = (req.query.titleSlug || '').toLowerCase();
