@@ -8,16 +8,15 @@ app.use(cors());
 const PORT = process.env.PORT || 3000;
 
 const PLAYER_DOMAINS = [
-  'streamtape', 'dood', 'filemoon', 'voe',
-  'streamwish', 'links.cuevana.ac', 'player.cuevana.ac',
+  'streamtape', 'filemoon', 'voe',
   'vidfast', 'mp4upload', 'uqload', 'upstream',
-  'fembed', 'vidbom', 'embed.su', 'player.cuevana',
-  'ok.ru', 'vidlox', 'mixdrop', 'netu',
+  'fembed', 'vidbom', 'embed.su',
+  'ok.ru', 'vidlox', 'netu',
   'videobin', 'vidmoly', 'vudeo', 'wishfast', 'streamvid',
   'video.cuevana.cz',
 ];
 
-const PLAYER_REGEX = /['"](https?:\/\/(?:(?:streamtape|dood|filemoon|voe|streamwish|links\.cuevana\.ac|player\.cuevana\.ac|vidfast|mp4upload|uqload|upstream|fembed|vidbom|embed\.su|player\.cuevana|ok\.ru|vidlox|mixdrop|netu|videobin|vidmoly|vudeo|wishfast|streamvid|video\.cuevana\.cz)[^'"<>\s]+))['"]/gi;
+const PLAYER_REGEX = /['"](https?:\/\/(?:(?:streamtape|filemoon|voe|vidfast|mp4upload|uqload|upstream|fembed|vidbom|embed\.su|ok\.ru|vidlox|netu|videobin|vidmoly|vudeo|wishfast|streamvid|video\.cuevana\.cz)[^'"<>\s]+))['"]/gi;
 
 function extractFromHtml(html) {
   const urls = new Set();
