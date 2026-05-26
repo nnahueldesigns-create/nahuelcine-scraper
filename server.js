@@ -28,6 +28,28 @@ function extractFromHtml(html) {
 
 const langOrder = u => /[#&]lang=LAT/i.test(u) ? 0 : /[#&]lang=VOS/i.test(u) ? 1 : /[#&]lang=SUB/i.test(u) ? 2 : 3;
 
+// ─── SHARED BROWSER ────────────────────────────────────────────────────────
+// Reuse a single Chromium process across requests to avoid Railway resource limits.
+let sharedBrowser = null;
+
+async function getSharedBrowser() {
+  if (sharedBrowser?.isConnected()) return sharedBrowser;
+  sharedBrowser = await chromium.launch({
+    headless: true,
+    args: [
+      '--disable-blink-features=AutomationControlled',
+      '--no-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-gpu',
+      '--no-zygote',
+      '--disable-extensions',
+      '--disable-background-networking',
+    ],
+  });
+  sharedBrowser.on('disconnected', () => { sharedBrowser = null; });
+  return sharedBrowser;
+}
+
 async function tryClickEpisode(page, season, episode) {
   const s = parseInt(season);
   const e = parseInt(episode);
@@ -63,19 +85,16 @@ app.get('/scrape', async (req, res) => {
   const { url, season, episode, searchUrl, sectionFilter } = req.query;
   if (!url && !searchUrl) return res.status(400).json({ error: 'url or searchUrl required' });
 
-  let browser;
+  let context;
   const timeoutMs = 60000;
   const timer = setTimeout(async () => {
-    if (browser) await browser.close().catch(() => {});
+    if (context) await context.close().catch(() => {});
     if (!res.headersSent) res.status(504).json({ error: 'timeout', urls: [] });
   }, timeoutMs);
 
   try {
-    browser = await chromium.launch({
-      headless: true,
-      args: ['--disable-blink-features=AutomationControlled', '--no-sandbox'],
-    });
-    const context = await browser.newContext({
+    const browser = await getSharedBrowser();
+    context = await browser.newContext({
       userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
       locale: 'es-AR',
       extraHTTPHeaders: {
@@ -93,12 +112,10 @@ app.get('/scrape', async (req, res) => {
     page.on('response', async (response) => {
       try {
         const resUrl = response.url();
-        // Capture inner player domain responses (not video.cuevana.cz itself)
         if (INNER_PLAYER_DOMAINS.some(d => resUrl.includes(d))) {
           networkUrls.add(resUrl);
           return;
         }
-        // Also capture video.cuevana.cz responses but scan their content for inner URLs
         const ct = response.headers()['content-type'] || '';
         if (ct.includes('json') || ct.includes('text/html') || ct.includes('text/plain')) {
           const text = await response.text().catch(() => '');
@@ -115,12 +132,10 @@ app.get('/scrape', async (req, res) => {
     if (searchUrl) {
       console.log(`[search] navigating to: ${searchUrl}`);
       await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 20000 });
-      // Wait for Cloudflare challenge to resolve if present
       await page.waitForFunction(
         () => !document.title.toLowerCase().includes('just a moment'),
         { timeout: 15000 }
       ).catch(() => {});
-      // Wait for result links to appear (React SPAs load results via AJAX after domcontentloaded)
       const resultSelector = sectionFilter
         ? `a[href*="${sectionFilter}"]`
         : 'a[href*="/pelicula/"], a[href*="/serie/"]';
@@ -134,9 +149,7 @@ app.get('/scrape', async (req, res) => {
       const foundLink = await page.evaluate(({ f, words }) => {
         const links = [...document.querySelectorAll('a[href]')]
           .filter(a => f ? a.href.includes(f) : true);
-
         if (!words.length) return links[0]?.href || null;
-
         let best = null, bestScore = 0;
         for (const a of links) {
           const href = a.href.toLowerCase();
@@ -149,12 +162,11 @@ app.get('/scrape', async (req, res) => {
       if (!foundLink) {
         console.warn(`[search] no matching link for slug: ${titleSlug}`);
         clearTimeout(timer);
-        await browser.close();
+        await context.close();
         return res.json({ urls: [] });
       }
 
       targetUrl = foundLink;
-      // For Cuevana TV: episode pages live at /{slug}/{season}/{episode}/ — go directly
       if (season && episode && /\/serie\//.test(targetUrl)) {
         targetUrl = targetUrl.replace(/\/+$/, '') + `/${season}/${episode}/`;
         console.log(`[search] episode URL: ${targetUrl}`);
@@ -166,13 +178,11 @@ app.get('/scrape', async (req, res) => {
       await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 20000 });
     }
 
-    // Wait for Cloudflare challenge to resolve if present
     await page.waitForFunction(
       () => !document.title.toLowerCase().includes('just a moment'),
       { timeout: 20000 }
     ).catch(() => {});
 
-    // Wait for page content to render (React SPAs need JS execution after CF)
     await page.waitForSelector('[data-server], iframe[src]', { timeout: 6000 }).catch(() => {});
 
     if (season && episode) {
@@ -193,8 +203,6 @@ app.get('/scrape', async (req, res) => {
       if (src && PLAYER_DOMAINS.some(d => src.includes(d))) urls.add(src);
     }
 
-    // Click ALL [data-server*="video.cuevana.cz"] buttons so the player loads inside
-    // cuevana.cz context — network interceptor captures inner filemoon/streamtape/etc. URLs
     const cuevanaServerEls = await page.$$('[data-server*="video.cuevana.cz"]');
     if (cuevanaServerEls.length > 0) {
       const toClick = cuevanaServerEls.slice(0, 3);
@@ -204,12 +212,10 @@ app.get('/scrape', async (req, res) => {
           await el.click();
           await page.waitForTimeout(2500);
         } catch {}
-        // Stop early if we already captured inner player URLs (not video.cuevana.cz)
         const innerFound = [...networkUrls].some(u => INNER_PLAYER_DOMAINS.some(d => u.includes(d)));
         if (innerFound) break;
       }
     } else {
-      // Fallback: read data-server attrs directly (non-cuevana players like Gnula)
       const dataServers = await page.evaluate(() =>
         [...document.querySelectorAll('[data-server]')].map(el => el.getAttribute('data-server') || '')
       );
@@ -219,7 +225,6 @@ app.get('/scrape', async (req, res) => {
       }
     }
 
-    // If no player iframes yet, wait up to 5s more for dynamic JS to create them (e.g. Gnula/smin2.js)
     if (!urls.size) {
       await page.waitForFunction((domains) => {
         return [...document.querySelectorAll('iframe')].some(f => {
@@ -234,8 +239,6 @@ app.get('/scrape', async (req, res) => {
       }
     }
 
-    // Add any player URLs captured from network responses
-    // Prefer inner player URLs over video.cuevana.cz URLs
     const innerNetworkUrls = [...networkUrls].filter(u => INNER_PLAYER_DOMAINS.some(d => u.includes(d)));
     const cuevanaNetworkUrls = [...networkUrls].filter(u => u.includes('video.cuevana.cz'));
     for (const u of (innerNetworkUrls.length ? innerNetworkUrls : cuevanaNetworkUrls)) urls.add(u);
@@ -249,13 +252,13 @@ app.get('/scrape', async (req, res) => {
 
     console.log(`[scrape] done: ${urls.size} URL(s) for ${targetUrl}`);
     clearTimeout(timer);
-    await browser.close();
+    await context.close();
 
     const sorted = [...urls].sort((a, b) => langOrder(a) - langOrder(b));
     res.json({ urls: sorted });
   } catch (err) {
     clearTimeout(timer);
-    if (browser) await browser.close().catch(() => {});
+    if (context) await context.close().catch(() => {});
     if (!res.headersSent) res.status(500).json({ error: err.message, urls: [] });
   }
 });
