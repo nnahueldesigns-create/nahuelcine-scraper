@@ -12,11 +12,12 @@ const PLAYER_DOMAINS = [
   'jawcloud', 'streamwish', 'links.cuevana.ac', 'player.cuevana.ac',
   'vidfast', 'mp4upload', 'uqload', 'upstream',
   'fembed', 'vidbom', 'embed.su', 'player.cuevana',
-  'ok.ru', 'uqload', 'vidlox', 'mixdrop', 'netu',
+  'ok.ru', 'vidlox', 'mixdrop', 'netu',
   'videobin', 'vidmoly', 'vudeo', 'wishfast', 'streamvid',
+  'video.cuevana.cz',
 ];
 
-const PLAYER_REGEX = /['"](https?:\/\/(?:(?:streamtape|dood|filemoon|voe|streamz|jawcloud|streamwish|links\.cuevana\.ac|player\.cuevana\.ac|vidfast|mp4upload|uqload|upstream|fembed|vidbom|embed\.su|player\.cuevana|ok\.ru|vidlox|mixdrop|netu|videobin|vidmoly|vudeo|wishfast|streamvid)[^'"<>\s]+))['"]/gi;
+const PLAYER_REGEX = /['"](https?:\/\/(?:(?:streamtape|dood|filemoon|voe|streamz|jawcloud|streamwish|links\.cuevana\.ac|player\.cuevana\.ac|vidfast|mp4upload|uqload|upstream|fembed|vidbom|embed\.su|player\.cuevana|ok\.ru|vidlox|mixdrop|netu|videobin|vidmoly|vudeo|wishfast|streamvid|video\.cuevana\.cz)[^'"<>\s]+))['"]/gi;
 
 function extractFromHtml(html) {
   const urls = new Set();
@@ -97,22 +98,20 @@ app.get('/scrape', async (req, res) => {
       const titleSlug = (req.query.titleSlug || '').toLowerCase();
       const slugWords = titleSlug.split('-').filter(w => w.length > 2);
 
-      const foundLink = await page.evaluate((f, words) => {
+      const foundLink = await page.evaluate(({ f, words }) => {
         const links = [...document.querySelectorAll('a[href]')]
           .filter(a => f ? a.href.includes(f) : true);
 
         if (!words.length) return links[0]?.href || null;
 
-        // Score each link by how many title words appear in its URL
         let best = null, bestScore = 0;
         for (const a of links) {
           const href = a.href.toLowerCase();
           const score = words.filter(w => href.includes(w)).length;
           if (score > bestScore) { bestScore = score; best = a.href; }
         }
-        // Require at least 1 word match to avoid returning a wrong movie
         return bestScore > 0 ? best : null;
-      }, filter, slugWords);
+      }, { f: filter, words: slugWords });
 
       if (!foundLink) {
         console.warn(`[search] no matching link for slug: ${titleSlug}`);
@@ -137,16 +136,43 @@ app.get('/scrape', async (req, res) => {
 
     const urls = new Set();
 
-    const iframeSrcs = await page.evaluate(() =>
+    const getIframeSrcs = () => page.evaluate(() =>
       [...document.querySelectorAll('iframe')].map(f => f.getAttribute('src') || f.getAttribute('data-src') || '')
     );
+
+    let iframeSrcs = await getIframeSrcs();
     for (const src of iframeSrcs) {
       if (src && PLAYER_DOMAINS.some(d => src.includes(d))) urls.add(src);
     }
 
+    // Check data-server attributes (e.g. Cuevana uses <li data-server="..."> for player selection)
+    const dataServers = await page.evaluate(() =>
+      [...document.querySelectorAll('[data-server]')].map(el => el.getAttribute('data-server') || '')
+    );
+    for (const src of dataServers) {
+      if (src && PLAYER_DOMAINS.some(d => src.includes(d))) urls.add(src);
+    }
+
+    // If no player iframes yet, wait up to 5s more for dynamic JS to create them (e.g. Gnula/smin2.js)
+    if (!urls.size) {
+      await page.waitForFunction((domains) => {
+        return [...document.querySelectorAll('iframe')].some(f => {
+          const src = f.getAttribute('src') || '';
+          return domains.some(d => src.includes(d));
+        });
+      }, PLAYER_DOMAINS, { timeout: 5000 }).catch(() => {});
+
+      iframeSrcs = await getIframeSrcs();
+      for (const src of iframeSrcs) {
+        if (src && PLAYER_DOMAINS.some(d => src.includes(d))) urls.add(src);
+      }
+    }
+
     if (!urls.size) {
       const html = await page.content();
-      for (const u of extractFromHtml(html)) urls.add(u);
+      for (const u of extractFromHtml(html)) {
+        if (!/\.js(\?|$)/.test(u) && !/\.css(\?|$)/.test(u)) urls.add(u);
+      }
     }
 
     clearTimeout(timer);
