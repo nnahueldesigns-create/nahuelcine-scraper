@@ -136,14 +136,13 @@ app.get('/scrape', async (req, res) => {
     const iframeSrcs = await page.evaluate(() =>
       [...document.querySelectorAll('iframe')].map(f => f.getAttribute('src') || f.getAttribute('data-src') || '')
     );
+    const AD_BLACKLIST = /google\.com|facebook\.com|disqus\.com|doubleclick|googlesyndication|twitter\.com|amazon-adsystem|googletagmanager|recaptcha/i;
     for (const src of iframeSrcs) {
-      if (src && PLAYER_DOMAINS.some(d => src.includes(d))) urls.add(src);
+      if (src && /^https?:\/\//i.test(src) && !AD_BLACKLIST.test(src)) urls.add(src);
     }
 
-    if (!urls.size) {
-      const html = await page.content();
-      for (const u of extractFromHtml(html)) urls.add(u);
-    }
+    const html = await page.content();
+    for (const u of extractFromHtml(html)) urls.add(u);
 
     clearTimeout(timer);
     await browser.close();
