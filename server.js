@@ -10,9 +10,13 @@ const PORT = process.env.PORT || 3000;
 const PLAYER_DOMAINS = [
   'streamtape', 'dood', 'filemoon', 'voe', 'streamz',
   'jawcloud', 'streamwish', 'links.cuevana.ac', 'player.cuevana.ac',
+  'vidfast', 'mp4upload', 'uqload', 'upstream',
+  'fembed', 'vidbom', 'embed.su', 'player.cuevana',
+  'ok.ru', 'uqload', 'vidlox', 'mixdrop', 'netu',
+  'videobin', 'vidmoly', 'vudeo', 'wishfast', 'streamvid',
 ];
 
-const PLAYER_REGEX = /['"](https?:\/\/(?:(?:streamtape|dood|filemoon|voe|streamz|jawcloud|streamwish|links\.cuevana\.ac|player\.cuevana\.ac)[^'"<>\s]+))['"]/gi;
+const PLAYER_REGEX = /['"](https?:\/\/(?:(?:streamtape|dood|filemoon|voe|streamz|jawcloud|streamwish|links\.cuevana\.ac|player\.cuevana\.ac|vidfast|mp4upload|uqload|upstream|fembed|vidbom|embed\.su|player\.cuevana|ok\.ru|vidlox|mixdrop|netu|videobin|vidmoly|vudeo|wishfast|streamvid)[^'"<>\s]+))['"]/gi;
 
 function extractFromHtml(html) {
   const urls = new Set();
@@ -136,13 +140,14 @@ app.get('/scrape', async (req, res) => {
     const iframeSrcs = await page.evaluate(() =>
       [...document.querySelectorAll('iframe')].map(f => f.getAttribute('src') || f.getAttribute('data-src') || '')
     );
-    const AD_BLACKLIST = /google\.com|facebook\.com|disqus\.com|doubleclick|googlesyndication|twitter\.com|amazon-adsystem|googletagmanager|recaptcha/i;
     for (const src of iframeSrcs) {
-      if (src && /^https?:\/\//i.test(src) && !AD_BLACKLIST.test(src)) urls.add(src);
+      if (src && PLAYER_DOMAINS.some(d => src.includes(d))) urls.add(src);
     }
 
-    const html = await page.content();
-    for (const u of extractFromHtml(html)) urls.add(u);
+    if (!urls.size) {
+      const html = await page.content();
+      for (const u of extractFromHtml(html)) urls.add(u);
+    }
 
     clearTimeout(timer);
     await browser.close();
