@@ -28,8 +28,41 @@ function extractFromHtml(html) {
 
 const langOrder = u => /[#&]lang=LAT/i.test(u) ? 0 : /[#&]lang=VOS/i.test(u) ? 1 : /[#&]lang=SUB/i.test(u) ? 2 : 3;
 
+// ─── STEALTH HEADERS ───────────────────────────────────────────────────────
+const STEALTH_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
+const STEALTH_HEADERS = {
+  'User-Agent': STEALTH_UA,
+  'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+  'Accept-Language': 'es-AR,es;q=0.9,en-US;q=0.8,en;q=0.7',
+  'sec-ch-ua': '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+  'sec-ch-ua-mobile': '?0',
+  'sec-ch-ua-platform': '"Windows"',
+};
+
+// ─── HTTP FAST PATH ────────────────────────────────────────────────────────
+// Try plain HTTP before Playwright. Avoids CF overhead when player URLs are
+// embedded in the initial HTML (script tags, data attributes, JSON config).
+async function tryHttpFetch(url) {
+  try {
+    const controller = new AbortController();
+    const t = setTimeout(() => controller.abort(), 8000);
+    const origin = new URL(url).origin;
+    const res = await fetch(url, {
+      headers: { ...STEALTH_HEADERS, 'Referer': origin + '/' },
+      signal: controller.signal,
+    });
+    clearTimeout(t);
+    if (!res.ok) return [];
+    const html = await res.text();
+    // CF challenge pages are short; skip them
+    if (html.length < 2000 || html.toLowerCase().includes('just a moment')) return [];
+    return extractFromHtml(html);
+  } catch {
+    return [];
+  }
+}
+
 // ─── SHARED BROWSER ────────────────────────────────────────────────────────
-// Reuse a single Chromium process across requests to avoid Railway resource limits.
 let sharedBrowser = null;
 
 async function getSharedBrowser() {
@@ -85,8 +118,19 @@ app.get('/scrape', async (req, res) => {
   const { url, season, episode, searchUrl, sectionFilter } = req.query;
   if (!url && !searchUrl) return res.status(400).json({ error: 'url or searchUrl required' });
 
+  // ─── HTTP FAST PATH ────────────────────────────────────────────────────
+  // Only for direct URL requests (not search). Fast, no Playwright overhead.
+  if (url && !searchUrl) {
+    const fastUrls = await tryHttpFetch(url);
+    if (fastUrls.length) {
+      console.log(`[http-fast] ${fastUrls.length} URL(s) from ${url}`);
+      return res.json({ urls: fastUrls.sort((a, b) => langOrder(a) - langOrder(b)) });
+    }
+  }
+
   let context;
-  const timeoutMs = 60000;
+  // 55s — gives Playwright room to work while staying safely under most gateway limits
+  const timeoutMs = 55000;
   const timer = setTimeout(async () => {
     if (context) await context.close().catch(() => {});
     if (!res.headersSent) res.status(504).json({ error: 'timeout', urls: [] });
@@ -95,19 +139,27 @@ app.get('/scrape', async (req, res) => {
   try {
     const browser = await getSharedBrowser();
     context = await browser.newContext({
-      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
+      userAgent: STEALTH_UA,
       locale: 'es-AR',
+      viewport: { width: 1366, height: 768 },
       extraHTTPHeaders: {
-        'Accept-Language': 'es-AR,es;q=0.9,en;q=0.8',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'es-AR,es;q=0.9,en-US;q=0.8,en;q=0.7',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+        'sec-ch-ua': '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+        'sec-ch-ua-mobile': '?0',
+        'sec-ch-ua-platform': '"Windows"',
       },
     });
     const page = await context.newPage();
     await page.addInitScript(() => {
       Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+      Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+      Object.defineProperty(navigator, 'languages', { get: () => ['es-AR', 'es', 'en-US', 'en'] });
+      window.chrome = { runtime: {}, loadTimes: () => {}, csi: () => {}, app: {} };
+      Object.defineProperty(screen, 'colorDepth', { get: () => 24 });
     });
 
-    // Set up network interceptor BEFORE any navigation so we capture everything
+    // Network interceptor — capture player URLs from all responses
     const networkUrls = new Set();
     page.on('response', async (response) => {
       try {
@@ -134,12 +186,12 @@ app.get('/scrape', async (req, res) => {
       await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 20000 });
       await page.waitForFunction(
         () => !document.title.toLowerCase().includes('just a moment'),
-        { timeout: 15000 }
+        { timeout: 10000 }
       ).catch(() => {});
       const resultSelector = sectionFilter
         ? `a[href*="${sectionFilter}"]`
         : 'a[href*="/pelicula/"], a[href*="/serie/"]';
-      await page.waitForSelector(resultSelector, { timeout: 8000 }).catch(() => {});
+      await page.waitForSelector(resultSelector, { timeout: 6000 }).catch(() => {});
       await page.waitForTimeout(500);
 
       const filter    = sectionFilter || '';
@@ -180,17 +232,17 @@ app.get('/scrape', async (req, res) => {
 
     await page.waitForFunction(
       () => !document.title.toLowerCase().includes('just a moment'),
-      { timeout: 20000 }
+      { timeout: 15000 }
     ).catch(() => {});
 
-    await page.waitForSelector('[data-server], iframe[src]', { timeout: 6000 }).catch(() => {});
+    await page.waitForSelector('[data-server], iframe[src]', { timeout: 5000 }).catch(() => {});
 
     if (season && episode) {
       await page.waitForTimeout(1000);
       await tryClickEpisode(page, season, episode);
     }
 
-    await page.waitForTimeout(1500);
+    await page.waitForTimeout(800);
 
     const urls = new Set();
 
@@ -231,7 +283,7 @@ app.get('/scrape', async (req, res) => {
           const src = f.getAttribute('src') || '';
           return domains.some(d => src.includes(d));
         });
-      }, PLAYER_DOMAINS, { timeout: 5000 }).catch(() => {});
+      }, PLAYER_DOMAINS, { timeout: 3000 }).catch(() => {});
 
       iframeSrcs = await getIframeSrcs();
       for (const src of iframeSrcs) {
