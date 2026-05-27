@@ -205,7 +205,9 @@ app.get('/scrape', async (req, res) => {
         let best = null, bestScore = 0;
         for (const a of links) {
           const href = a.href.toLowerCase();
-          const score = words.filter(w => href.includes(w)).length;
+          const text = (a.textContent || '').toLowerCase().replace(/\s+/g, '-');
+          const combined = href + ' ' + text;
+          const score = words.filter(w => combined.includes(w)).length;
           if (score > bestScore) { bestScore = score; best = a.href; }
         }
         return bestScore > 0 ? best : null;
@@ -255,25 +257,86 @@ app.get('/scrape', async (req, res) => {
       if (src && PLAYER_DOMAINS.some(d => src.includes(d))) urls.add(src);
     }
 
-    const cuevanaServerEls = await page.$$('[data-server*="video.cuevana.cz"]');
-    if (cuevanaServerEls.length > 0) {
-      const toClick = cuevanaServerEls.slice(0, 3);
-      console.log(`[cuevana] clicking ${toClick.length}/${cuevanaServerEls.length} server button(s)`);
-      for (const el of toClick) {
+    // ─── CUEVANA POPUP FLOW ──────────────────────────────────────────────────
+    // Real Cuevana UX: language tab → dropdown → REPRODUCIR → new tab → video
+    const isCuevanaPage = targetUrl.includes('cuevana.cz');
+    if (isCuevanaPage) {
+      const langPriority = ['Latino', 'Castellano', 'Subtitulado'];
+      let gotUrls = false;
+      for (const lang of langPriority) {
+        if (gotUrls) break;
         try {
-          await el.click();
-          await page.waitForTimeout(2500);
+          const langEl = await page.$(`text=${lang}`);
+          if (!langEl) continue;
+          await langEl.click();
+          await page.waitForTimeout(800);
+
+          const repBtns = await page.$$('text=REPRODUCIR');
+          console.log(`[cuevana] ${lang}: ${repBtns.length} REPRODUCIR button(s)`);
+
+          for (const btn of repBtns.slice(0, 3)) {
+            try {
+              const popupUrls = new Set();
+              const [popup] = await Promise.all([
+                context.waitForEvent('page', { timeout: 6000 }),
+                btn.click(),
+              ]);
+
+              popup.on('response', async (resp) => {
+                try {
+                  const u = resp.url();
+                  if (/\.(m3u8|ts|mp4)(\?|$)/i.test(u) || PLAYER_DOMAINS.some(d => u.includes(d))) {
+                    popupUrls.add(u); return;
+                  }
+                  const ct = resp.headers()['content-type'] || '';
+                  if (/video|mpegurl/i.test(ct)) { popupUrls.add(u); return; }
+                  if (/json|text\/(html|plain)/i.test(ct)) {
+                    const text = await resp.text().catch(() => '');
+                    for (const m of text.matchAll(PLAYER_REGEX)) popupUrls.add(m[1]);
+                  }
+                } catch {}
+              });
+
+              await popup.waitForLoadState('domcontentloaded', { timeout: 12000 }).catch(() => {});
+              await popup.waitForTimeout(2000);
+
+              const popupHtml = await popup.content().catch(() => '');
+              for (const u of extractFromHtml(popupHtml)) {
+                if (!/\.(js|css)(\?|$)/.test(u)) popupUrls.add(u);
+              }
+              await popup.close().catch(() => {});
+
+              console.log(`[cuevana] popup (${lang}): ${popupUrls.size} URL(s)`);
+              for (const u of popupUrls) urls.add(u);
+              if (urls.size) { gotUrls = true; break; }
+            } catch {}
+          }
         } catch {}
-        const innerFound = [...networkUrls].some(u => INNER_PLAYER_DOMAINS.some(d => u.includes(d)));
-        if (innerFound) break;
       }
-    } else {
-      const dataServers = await page.evaluate(() =>
-        [...document.querySelectorAll('[data-server]')].map(el => el.getAttribute('data-server') || '')
-      );
-      for (const src of dataServers) {
-        if (!src || !PLAYER_DOMAINS.some(d => src.includes(d))) continue;
-        urls.add(src);
+    }
+
+    // Non-cuevana or cuevana fallback: data-server based approach
+    if (!urls.size) {
+      const cuevanaServerEls = await page.$$('[data-server*="video.cuevana.cz"]');
+      if (cuevanaServerEls.length > 0) {
+        const toClick = cuevanaServerEls.slice(0, 3);
+        console.log(`[cuevana-fallback] clicking ${toClick.length} server button(s)`);
+        for (const el of toClick) {
+          try {
+            await el.click();
+            await page.waitForTimeout(2500);
+          } catch {}
+          const innerFound = [...networkUrls].some(u => INNER_PLAYER_DOMAINS.some(d => u.includes(d)));
+          if (innerFound) break;
+        }
+      } else {
+        const dataServers = await page.evaluate(() =>
+          [...document.querySelectorAll('[data-server]')].map(el => el.getAttribute('data-server') || '')
+        );
+        for (const src of dataServers) {
+          if (!src || !PLAYER_DOMAINS.some(d => src.includes(d))) continue;
+          urls.add(src);
+        }
       }
     }
 
@@ -291,9 +354,12 @@ app.get('/scrape', async (req, res) => {
       }
     }
 
-    const innerNetworkUrls = [...networkUrls].filter(u => INNER_PLAYER_DOMAINS.some(d => u.includes(d)));
-    const cuevanaNetworkUrls = [...networkUrls].filter(u => u.includes('video.cuevana.cz'));
-    for (const u of (innerNetworkUrls.length ? innerNetworkUrls : cuevanaNetworkUrls)) urls.add(u);
+    // Only add network URLs if popup flow didn't already populate urls
+    if (!isCuevanaPage || !urls.size) {
+      const innerNetworkUrls = [...networkUrls].filter(u => INNER_PLAYER_DOMAINS.some(d => u.includes(d)));
+      const cuevanaNetworkUrls = [...networkUrls].filter(u => u.includes('video.cuevana.cz'));
+      for (const u of (innerNetworkUrls.length ? innerNetworkUrls : cuevanaNetworkUrls)) urls.add(u);
+    }
 
     if (!urls.size) {
       const html = await page.content();
