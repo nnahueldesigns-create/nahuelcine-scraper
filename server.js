@@ -27,11 +27,11 @@ function extractFromHtml(html) {
   return [...urls];
 }
 
-const langOrder = u => /[#&]lang=LAT/i.test(u) ? 0 : /[#&]lang=VOS/i.test(u) ? 1 : /[#&]lang=SUB/i.test(u) ? 2 : 3;
+const langOrder = u => /[?#&]lang=LAT/i.test(u) ? 0 : /[?#&]lang=VOS/i.test(u) ? 1 : /[?#&]lang=SUB/i.test(u) ? 2 : 3;
 function langFromUrl(u) {
-  if (/[#&]lang=LAT/i.test(u)) return 'LAT';
-  if (/[#&]lang=VOS/i.test(u)) return 'VOS';
-  if (/[#&]lang=SUB/i.test(u)) return 'SUB';
+  if (/[?#&]lang=LAT/i.test(u)) return 'LAT';
+  if (/[?#&]lang=VOS/i.test(u)) return 'VOS';
+  if (/[?#&]lang=SUB/i.test(u)) return 'SUB';
   return null;
 }
 
@@ -157,10 +157,24 @@ app.get('/scrape', async (req, res) => {
   }
 
   let context;
+  const urls = new Set();
+  const urlLangs = new Map();
+  const LANG_CODES = { 'Latino': 'LAT', 'Castellano': 'ESP', 'Subtitulado': 'SUB' };
+
   const timeoutMs = 55000;
   const timer = setTimeout(async () => {
     if (context) await context.close().catch(() => {});
-    if (!res.headersSent) res.status(504).json({ error: 'timeout', urls: [] });
+    if (!res.headersSent) {
+      const collected = [...urls];
+      if (collected.length > 0) {
+        const sorted = collected.sort((a, b) => langOrder(a) - langOrder(b));
+        const languages = sorted.map(u => urlLangs.get(u) || langFromUrl(u) || 'LAT');
+        console.log(`[timeout] returning ${collected.length} partial URL(s)`);
+        res.json({ urls: sorted, languages });
+      } else {
+        res.status(504).json({ error: 'timeout', urls: [] });
+      }
+    }
   }, timeoutMs);
 
   enqueue(async () => { try {
@@ -273,9 +287,7 @@ app.get('/scrape', async (req, res) => {
 
     await page.waitForTimeout(800);
 
-    const urls = new Set();
-    const urlLangs = new Map();
-    const LANG_CODES = { 'Latino': 'LAT', 'Castellano': 'ESP', 'Subtitulado': 'SUB' };
+
 
     const getIframeSrcs = () => page.evaluate(() =>
       [...document.querySelectorAll('iframe')].map(f => f.getAttribute('src') || f.getAttribute('data-src') || '')
