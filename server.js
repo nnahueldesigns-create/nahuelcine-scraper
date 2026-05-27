@@ -298,7 +298,12 @@ app.get('/scrape', async (req, res) => {
               });
 
               await popup.waitForLoadState('domcontentloaded', { timeout: 12000 }).catch(() => {});
-              await popup.waitForTimeout(2000);
+
+              // Poll until an inner player URL appears, up to 8s
+              for (let i = 0; i < 16; i++) {
+                await popup.waitForTimeout(500);
+                if ([...popupUrls].some(u => INNER_PLAYER_DOMAINS.some(d => u.includes(d)))) break;
+              }
 
               const popupHtml = await popup.content().catch(() => '');
               for (const u of extractFromHtml(popupHtml)) {
@@ -306,8 +311,11 @@ app.get('/scrape', async (req, res) => {
               }
               await popup.close().catch(() => {});
 
-              console.log(`[cuevana] popup (${lang}): ${popupUrls.size} URL(s)`);
-              for (const u of popupUrls) urls.add(u);
+              // Prefer inner player URLs (streamtape/filemoon/etc) over video.cuevana.cz wrapper
+              const innerPopupUrls = [...popupUrls].filter(u => INNER_PLAYER_DOMAINS.some(d => u.includes(d)));
+              const finalPopupUrls = innerPopupUrls.length ? innerPopupUrls : [...popupUrls];
+              console.log(`[cuevana] popup (${lang}): ${popupUrls.size} URL(s), ${innerPopupUrls.length} inner`);
+              for (const u of finalPopupUrls) urls.add(u);
               if (urls.size) { gotUrls = true; break; }
             } catch {}
           }
