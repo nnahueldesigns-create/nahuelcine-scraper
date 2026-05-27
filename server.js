@@ -68,6 +68,26 @@ async function tryHttpFetch(url) {
   }
 }
 
+// ─── CONCURRENCY QUEUE ─────────────────────────────────────────────────────
+// One Playwright request at a time to avoid OOM on Railway (512MB limit)
+let _queueRunning = false;
+const _queue = [];
+function enqueue(fn) {
+  return new Promise((resolve, reject) => {
+    _queue.push({ fn, resolve, reject });
+    drainQueue();
+  });
+}
+async function drainQueue() {
+  if (_queueRunning || !_queue.length) return;
+  _queueRunning = true;
+  const { fn, resolve, reject } = _queue.shift();
+  try { resolve(await fn()); } catch (e) { reject(e); } finally {
+    _queueRunning = false;
+    drainQueue();
+  }
+}
+
 // ─── SHARED BROWSER ────────────────────────────────────────────────────────
 let sharedBrowser = null;
 
@@ -136,14 +156,13 @@ app.get('/scrape', async (req, res) => {
   }
 
   let context;
-  // 55s — gives Playwright room to work while staying safely under most gateway limits
   const timeoutMs = 55000;
   const timer = setTimeout(async () => {
     if (context) await context.close().catch(() => {});
     if (!res.headersSent) res.status(504).json({ error: 'timeout', urls: [] });
   }, timeoutMs);
 
-  try {
+  enqueue(async () => { try {
     const browser = await getSharedBrowser();
     context = await browser.newContext({
       userAgent: STEALTH_UA,
@@ -397,7 +416,10 @@ app.get('/scrape', async (req, res) => {
     clearTimeout(timer);
     if (context) await context.close().catch(() => {});
     if (!res.headersSent) res.status(500).json({ error: err.message, urls: [] });
-  }
+  } }).catch(() => {
+    clearTimeout(timer);
+    if (!res.headersSent) res.status(500).json({ error: 'queue error', urls: [] });
+  });
 });
 
 app.listen(PORT, () => console.log(`Scraper server on port ${PORT}`));
