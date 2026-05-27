@@ -27,6 +27,12 @@ function extractFromHtml(html) {
 }
 
 const langOrder = u => /[#&]lang=LAT/i.test(u) ? 0 : /[#&]lang=VOS/i.test(u) ? 1 : /[#&]lang=SUB/i.test(u) ? 2 : 3;
+function langFromUrl(u) {
+  if (/[#&]lang=LAT/i.test(u)) return 'LAT';
+  if (/[#&]lang=VOS/i.test(u)) return 'VOS';
+  if (/[#&]lang=SUB/i.test(u)) return 'SUB';
+  return null;
+}
 
 // ─── STEALTH HEADERS ───────────────────────────────────────────────────────
 const STEALTH_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
@@ -124,7 +130,8 @@ app.get('/scrape', async (req, res) => {
     const fastUrls = await tryHttpFetch(url);
     if (fastUrls.length) {
       console.log(`[http-fast] ${fastUrls.length} URL(s) from ${url}`);
-      return res.json({ urls: fastUrls.sort((a, b) => langOrder(a) - langOrder(b)) });
+      const sortedFast = fastUrls.sort((a, b) => langOrder(a) - langOrder(b));
+      return res.json({ urls: sortedFast, languages: sortedFast.map(langFromUrl) });
     }
   }
 
@@ -247,6 +254,8 @@ app.get('/scrape', async (req, res) => {
     await page.waitForTimeout(800);
 
     const urls = new Set();
+    const urlLangs = new Map();
+    const LANG_CODES = { 'Latino': 'LAT', 'Castellano': 'ESP', 'Subtitulado': 'SUB' };
 
     const getIframeSrcs = () => page.evaluate(() =>
       [...document.querySelectorAll('iframe')].map(f => f.getAttribute('src') || f.getAttribute('data-src') || '')
@@ -315,7 +324,8 @@ app.get('/scrape', async (req, res) => {
               const innerPopupUrls = [...popupUrls].filter(u => INNER_PLAYER_DOMAINS.some(d => u.includes(d)));
               const finalPopupUrls = innerPopupUrls.length ? innerPopupUrls : [...popupUrls];
               console.log(`[cuevana] popup (${lang}): ${popupUrls.size} URL(s), ${innerPopupUrls.length} inner`);
-              for (const u of finalPopupUrls) urls.add(u);
+              const lc = LANG_CODES[lang] || 'LAT';
+              for (const u of finalPopupUrls) { urls.add(u); if (!urlLangs.has(u)) urlLangs.set(u, lc); }
               if (urls.size) { gotUrls = true; break; }
             } catch {}
           }
@@ -381,7 +391,8 @@ app.get('/scrape', async (req, res) => {
     await context.close();
 
     const sorted = [...urls].sort((a, b) => langOrder(a) - langOrder(b));
-    res.json({ urls: sorted });
+    const languages = sorted.map(u => urlLangs.get(u) || langFromUrl(u));
+    res.json({ urls: sorted, languages });
   } catch (err) {
     clearTimeout(timer);
     if (context) await context.close().catch(() => {});
