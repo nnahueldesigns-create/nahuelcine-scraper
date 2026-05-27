@@ -406,6 +406,22 @@ app.get('/scrape', async (req, res) => {
       }
     }
 
+    // For Cuevana URLs without a language tag, detect from page DOM
+    if (isCuevanaPage) {
+      const untagged = [...urls].filter(u => !urlLangs.has(u));
+      if (untagged.length) {
+        const pageLangText = await page.evaluate(() => {
+          for (const t of ['Latino', 'Castellano', 'Subtitulado']) {
+            if (document.body?.textContent?.includes(t)) return t;
+          }
+          return null;
+        }).catch(() => null);
+        const detectedLang = LANG_CODES[pageLangText] || 'LAT';
+        console.log(`[cuevana] untagged URLs → detected lang: ${detectedLang}`);
+        for (const u of untagged) urlLangs.set(u, detectedLang);
+      }
+    }
+
     console.log(`[scrape] done: ${urls.size} URL(s) for ${targetUrl}`);
     clearTimeout(timer);
     await context.close();
