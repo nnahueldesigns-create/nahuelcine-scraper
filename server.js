@@ -495,11 +495,43 @@ app.get('/scrape', async (req, res) => {
   } catch (err) {
     clearTimeout(timer);
     if (context) await context.close().catch(() => {});
-    if (!res.headersSent) res.status(500).json({ error: err.message, urls: [] });
+    if (!res.headersSent) res.json({ urls: [], error: err.message });
   } }).catch(() => {
     clearTimeout(timer);
-    if (!res.headersSent) res.status(500).json({ error: 'queue error', urls: [] });
+    if (!res.headersSent) res.json({ urls: [] });
   });
+});
+
+// ─── /extract — HTTP-only direct video URL extraction ─────────────────────────
+// Fetches an embed page and looks for m3u8/mp4 URLs in the source.
+// No Playwright — fast, cheap. Falls back gracefully if obfuscated.
+async function tryExtractVideo(url) {
+  try {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 8000);
+    const origin = new URL(url).origin;
+    const res = await fetch(url, {
+      headers: { ...STEALTH_HEADERS, 'Referer': origin + '/', 'Accept': '*/*' },
+      signal: ctrl.signal,
+    });
+    clearTimeout(t);
+    if (!res.ok) return null;
+    const text = await res.text();
+    const m3u8 = text.match(/['"`](https?:\/\/[^'"`\s]+\.m3u8[^'"`\s]*)[`'"]/i);
+    if (m3u8) return m3u8[1];
+    const mp4 = text.match(/['"`](https?:\/\/[^'"`\s]+\.mp4[^'"`\s]*)[`'"]/i);
+    if (mp4) return mp4[1];
+  } catch {}
+  return null;
+}
+
+app.get('/extract', async (req, res) => {
+  const { url } = req.query;
+  if (!url) return res.status(400).json({ error: 'url required' });
+  console.log(`[extract] ${url}`);
+  const direct = await tryExtractVideo(url);
+  console.log(`[extract] result: ${direct || 'null'}`);
+  res.json({ url: direct });
 });
 
 app.listen(PORT, () => console.log(`Scraper server on port ${PORT}`));
