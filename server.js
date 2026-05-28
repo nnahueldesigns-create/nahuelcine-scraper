@@ -142,7 +142,7 @@ async function tryClickEpisode(page, season, episode) {
 }
 
 app.get('/scrape', async (req, res) => {
-  const { url, season, episode, searchUrl, sectionFilter } = req.query;
+  const { url, season, episode, searchUrl, sectionFilter, year } = req.query;
   if (!url && !searchUrl) return res.status(400).json({ error: 'url or searchUrl required' });
 
   // ─── HTTP FAST PATH ────────────────────────────────────────────────────
@@ -239,20 +239,29 @@ app.get('/scrape', async (req, res) => {
       const titleSlug = (req.query.titleSlug || '').toLowerCase();
       const slugWords = titleSlug.split('-').filter(w => w.length > 2);
 
-      const foundLink = await page.evaluate(({ f, words }) => {
+      const foundLink = await page.evaluate(({ f, words, yr }) => {
         const links = [...document.querySelectorAll('a[href]')]
           .filter(a => f ? a.href.includes(f) : true);
         if (!words.length) return links[0]?.href || null;
-        let best = null, bestScore = 0;
+        let best = null, bestScore = -Infinity;
         for (const a of links) {
           const href = a.href.toLowerCase();
           const text = (a.textContent || '').toLowerCase().replace(/\s+/g, '-');
           const combined = href + ' ' + text;
-          const score = words.filter(w => combined.includes(w)).length;
-          if (score > bestScore) { bestScore = score; best = a.href; }
+          const titleScore = words.filter(w => combined.includes(w)).length;
+          if (titleScore === 0) continue;
+          let yearScore = 0;
+          if (yr) {
+            const card = a.closest('article, .item, .card, li') || a.parentElement;
+            const cardText = card?.textContent || '';
+            if (cardText.includes(String(yr))) yearScore = 3;
+            else if (cardText.includes(String(parseInt(yr) - 1))) yearScore = 1;
+          }
+          const total = titleScore + yearScore;
+          if (total > bestScore) { bestScore = total; best = a.href; }
         }
         return bestScore > 0 ? best : null;
-      }, { f: filter, words: slugWords });
+      }, { f: filter, words: slugWords, yr: year || null });
 
       if (!foundLink) {
         console.warn(`[search] no matching link for slug: ${titleSlug}`);
