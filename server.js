@@ -181,7 +181,7 @@ app.get('/scrape', async (req, res) => {
   let context;
   const urls = new Set();
   const urlLangs = new Map();
-  const LANG_CODES = { 'Latino': 'LAT', 'Castellano': 'ESP', 'Subtitulado': 'SUB' };
+  const LANG_CODES = { 'Latino': 'LAT', 'Castellano': 'ESP', 'Subtitulado': 'SUB', 'Inglés': 'ENG', 'Ingles': 'ENG', 'English': 'ENG' };
 
   const sendSse = (u, lang) => {
     if (streamMode && !res.writableEnded) res.write(`data: ${JSON.stringify({ url: u, lang })}\n\n`);
@@ -343,7 +343,7 @@ app.get('/scrape', async (req, res) => {
     // stream mode: traverse ALL language tabs + ALL buttons, SSE each URL on find
     const isCuevanaPage = targetUrl.includes('cuevana.cz');
     if (isCuevanaPage) {
-      const langPriority = ['Latino', 'Castellano', 'Subtitulado'];
+      const langPriority = ['Latino', 'Castellano', 'Subtitulado', 'Inglés', 'English'];
       let gotUrls = false;
       for (const lang of langPriority) {
         if (!streamMode && gotUrls) break;
