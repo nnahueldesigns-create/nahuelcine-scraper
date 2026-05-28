@@ -70,8 +70,9 @@ async function tryHttpFetch(url) {
 }
 
 // ─── CONCURRENCY QUEUE ─────────────────────────────────────────────────────
-// One Playwright request at a time to avoid OOM on Railway (512MB limit)
-let _queueRunning = false;
+// 2 concurrent Playwright contexts (each ~150MB; shared browser keeps overhead low)
+const MAX_CONCURRENT = 2;
+let _running = 0;
 const _queue = [];
 function enqueue(fn) {
   return new Promise((resolve, reject) => {
@@ -79,13 +80,14 @@ function enqueue(fn) {
     drainQueue();
   });
 }
-async function drainQueue() {
-  if (_queueRunning || !_queue.length) return;
-  _queueRunning = true;
-  const { fn, resolve, reject } = _queue.shift();
-  try { resolve(await fn()); } catch (e) { reject(e); } finally {
-    _queueRunning = false;
-    drainQueue();
+function drainQueue() {
+  while (_running < MAX_CONCURRENT && _queue.length) {
+    _running++;
+    const { fn, resolve, reject } = _queue.shift();
+    (async () => {
+      try { resolve(await fn()); } catch (e) { reject(e); }
+      finally { _running--; drainQueue(); }
+    })();
   }
 }
 
@@ -156,6 +158,9 @@ app.get('/scrape', async (req, res) => {
     }
   }
 
+  let clientGone = false;
+  req.on('close', () => { clientGone = true; });
+
   let context;
   const urls = new Set();
   const urlLangs = new Map();
@@ -178,6 +183,7 @@ app.get('/scrape', async (req, res) => {
   }, timeoutMs);
 
   enqueue(async () => { try {
+    if (clientGone) { clearTimeout(timer); if (!res.headersSent) res.json({ urls: [] }); return; }
     const browser = await getSharedBrowser();
     context = await browser.newContext({
       userAgent: STEALTH_UA,
