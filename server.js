@@ -145,6 +145,7 @@ async function tryClickEpisode(page, season, episode) {
 
 app.get('/scrape', async (req, res) => {
   const { url, season, episode, searchUrl, sectionFilter, year } = req.query;
+  const streamMode = req.query.stream === '1';
   if (!url && !searchUrl) return res.status(400).json({ error: 'url or searchUrl required' });
 
   // ─── HTTP FAST PATH ────────────────────────────────────────────────────
@@ -154,8 +155,24 @@ app.get('/scrape', async (req, res) => {
     if (fastUrls.length) {
       console.log(`[http-fast] ${fastUrls.length} URL(s) from ${url}`);
       const sortedFast = fastUrls.sort((a, b) => langOrder(a) - langOrder(b));
+      if (streamMode) {
+        res.setHeader('Content-Type', 'text/event-stream');
+        res.setHeader('Cache-Control', 'no-cache');
+        res.setHeader('Connection', 'keep-alive');
+        for (const u of sortedFast) res.write(`data: ${JSON.stringify({ url: u, lang: langFromUrl(u) })}\n\n`);
+        res.write('event: done\ndata: {}\n\n');
+        return res.end();
+      }
       return res.json({ urls: sortedFast, languages: sortedFast.map(langFromUrl) });
     }
+  }
+
+  // Set SSE headers before entering queue so client can start receiving
+  if (streamMode) {
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.flushHeaders();
   }
 
   let clientGone = false;
@@ -166,9 +183,17 @@ app.get('/scrape', async (req, res) => {
   const urlLangs = new Map();
   const LANG_CODES = { 'Latino': 'LAT', 'Castellano': 'ESP', 'Subtitulado': 'SUB' };
 
+  const sendSse = (u, lang) => {
+    if (streamMode && !res.writableEnded) res.write(`data: ${JSON.stringify({ url: u, lang })}\n\n`);
+  };
+  const doneSse = () => {
+    if (streamMode && !res.writableEnded) { res.write('event: done\ndata: {}\n\n'); res.end(); }
+  };
+
   const timeoutMs = 55000;
   const timer = setTimeout(async () => {
     if (context) await context.close().catch(() => {});
+    if (streamMode) { doneSse(); return; }
     if (!res.headersSent) {
       const collected = [...urls];
       if (collected.length > 0) {
@@ -315,12 +340,14 @@ app.get('/scrape', async (req, res) => {
 
     // ─── CUEVANA POPUP FLOW ──────────────────────────────────────────────────
     // Real Cuevana UX: language tab → dropdown → REPRODUCIR → new tab → video
+    // stream mode: traverse ALL language tabs + ALL buttons, SSE each URL on find
     const isCuevanaPage = targetUrl.includes('cuevana.cz');
     if (isCuevanaPage) {
       const langPriority = ['Latino', 'Castellano', 'Subtitulado'];
       let gotUrls = false;
       for (const lang of langPriority) {
-        if (gotUrls) break;
+        if (!streamMode && gotUrls) break;
+        if (clientGone) break;
         try {
           const langEl = await page.$(`text=${lang}`);
           if (!langEl) continue;
@@ -330,7 +357,8 @@ app.get('/scrape', async (req, res) => {
           const repBtns = await page.$$('text=REPRODUCIR');
           console.log(`[cuevana] ${lang}: ${repBtns.length} REPRODUCIR button(s)`);
 
-          for (const btn of repBtns.slice(0, 3)) {
+          for (const btn of repBtns.slice(0, streamMode ? 5 : 3)) {
+            if (clientGone) break;
             try {
               const popupUrls = new Set();
               const [popup] = await Promise.all([
@@ -372,8 +400,15 @@ app.get('/scrape', async (req, res) => {
               const finalPopupUrls = innerPopupUrls.length ? innerPopupUrls : [...popupUrls];
               console.log(`[cuevana] popup (${lang}): ${popupUrls.size} URL(s), ${innerPopupUrls.length} inner`);
               const lc = LANG_CODES[lang] || 'LAT';
-              for (const u of finalPopupUrls) { urls.add(u); if (!urlLangs.has(u)) urlLangs.set(u, lc); }
-              if (urls.size) { gotUrls = true; break; }
+              for (const u of finalPopupUrls) {
+                if (!urls.has(u)) {
+                  urls.add(u);
+                  if (!urlLangs.has(u)) urlLangs.set(u, lc);
+                  sendSse(u, lc); // stream immediately in SSE mode
+                }
+              }
+              if (urls.size) gotUrls = true;
+              if (!streamMode && gotUrls) break; // non-stream: stop after first success per lang
             } catch {}
           }
         } catch {}
@@ -453,6 +488,7 @@ app.get('/scrape', async (req, res) => {
     clearTimeout(timer);
     await context.close();
 
+    if (streamMode) { doneSse(); return; }
     const sorted = [...urls].sort((a, b) => langOrder(a) - langOrder(b));
     const languages = sorted.map(u => urlLangs.get(u) || langFromUrl(u));
     res.json({ urls: sorted, languages });
