@@ -74,6 +74,29 @@ function extractFromHtml(html) {
   return [...urls];
 }
 
+// ─── CUEVANA SERVER PARSER ──────────────────────────────────────────────────
+// El idioma de cada server NO está en la URL (token/v opacos). Está en la
+// pestaña: cada `data-server="...video.cuevana.cz..."` cae bajo una pestaña con
+// una imagen `image/<código>.png` (lat/cas/sub/eng). El idioma de un server =
+// el de la última imagen de idioma que aparece ANTES en el HTML. Parsear esto
+// del HTML da idioma correcto sin clicks ni Playwright.
+const CUEVANA_LANG_IMG = { lat: 'LAT', cas: 'ESP', cast: 'ESP', esp: 'ESP', sub: 'SUB', vose: 'SUB', vos: 'VOS', eng: 'ENG', ing: 'ENG' };
+function parseCuevanaServers(html) {
+  const langPos = [...html.matchAll(/image\/(lat|cas|cast|esp|sub|vose?|vos|eng|ing)\.png/gi)]
+    .map(m => ({ lang: m[1].toLowerCase(), pos: m.index }));
+  const out = [];
+  const seen = new Set();
+  for (const m of html.matchAll(/data-server="([^"]+)"/g)) {
+    const u = m[1];
+    if (!u.includes('video.cuevana.cz') || seen.has(u)) continue;
+    seen.add(u);
+    let lang = null;
+    for (const lp of langPos) { if (lp.pos < m.index) lang = CUEVANA_LANG_IMG[lp.lang] || null; else break; }
+    out.push({ url: u, lang });
+  }
+  return out;
+}
+
 const langOrder = u => /[?#&]lang=LAT/i.test(u) ? 0 : /[?#&]lang=VOS/i.test(u) ? 1 : /[?#&]lang=SUB/i.test(u) ? 2 : 3;
 function langFromUrl(u) {
   if (/[?#&]lang=LAT/i.test(u)) return 'LAT';
@@ -111,6 +134,26 @@ async function tryHttpFetch(url) {
     // CF challenge pages are short; skip them
     if (html.length < 2000 || html.toLowerCase().includes('just a moment')) return [];
     return extractFromHtml(html);
+  } catch {
+    return [];
+  }
+}
+
+// HTTP fast path específico de Cuevana: devuelve servers + idioma desde el HTML
+// (data-server + imagen de idioma de su pestaña), sin Playwright.
+async function tryCuevanaHttp(url) {
+  try {
+    const controller = new AbortController();
+    const t = setTimeout(() => controller.abort(), 8000);
+    const res = await fetch(url, {
+      headers: { ...STEALTH_HEADERS, 'Referer': 'https://cuevana.cz/' },
+      signal: controller.signal,
+    });
+    clearTimeout(t);
+    if (!res.ok) return [];
+    const html = await res.text();
+    if (html.length < 2000 || html.toLowerCase().includes('just a moment')) return [];
+    return parseCuevanaServers(html); // [{ url, lang }]
   } catch {
     return [];
   }
@@ -218,6 +261,25 @@ app.get('/scrape', async (req, res) => {
   // ─── HTTP FAST PATH ────────────────────────────────────────────────────
   // Only for direct URL requests (not search). Fast, no Playwright overhead.
   if (url && !searchUrl) {
+    // Cuevana: parse del HTML con idioma por pestaña, sin Playwright.
+    if (url.includes('cuevana.cz')) {
+      const servers = await tryCuevanaHttp(url); // [{ url, lang }]
+      if (servers.length) {
+        console.log(`[http-fast/cuevana] ${servers.length} server(s) from ${url}`);
+        const urls2 = servers.map(s => s.url);
+        const langs2 = servers.map(s => s.lang);
+        await cacheSet(ckey, { urls: urls2, languages: langs2 });
+        if (streamMode) {
+          res.setHeader('Content-Type', 'text/event-stream');
+          res.setHeader('Cache-Control', 'no-cache');
+          res.setHeader('Connection', 'keep-alive');
+          servers.forEach(s => res.write(`data: ${JSON.stringify({ url: s.url, lang: s.lang })}\n\n`));
+          res.write('event: done\ndata: {}\n\n');
+          return res.end();
+        }
+        return res.json({ urls: urls2, languages: langs2 });
+      }
+    }
     const fastUrls = await tryHttpFetch(url);
     if (fastUrls.length) {
       console.log(`[http-fast] ${fastUrls.length} URL(s) from ${url}`);
@@ -412,87 +474,21 @@ app.get('/scrape', async (req, res) => {
       if (src && PLAYER_DOMAINS.some(d => src.includes(d))) urls.add(src);
     }
 
-    // ─── CUEVANA POPUP FLOW ──────────────────────────────────────────────────
-    // Real Cuevana UX: language tab → dropdown → REPRODUCIR → new tab → video
-    // stream mode: traverse ALL language tabs + ALL buttons, SSE each URL on find
+    // ─── CUEVANA: PARSE DEL DOM ──────────────────────────────────────────────
+    // El idioma de cada server vive en su pestaña (imagen lat/cas/sub/eng.png),
+    // NO en la URL (token/v opacos). Parsear el HTML de la página da los servers
+    // CON idioma correcto, sin clicks ni popups → rápido y fiable. (El viejo flujo
+    // de popups era lento y devolvía los mismos wrappers pero sin idioma.)
     const isCuevanaPage = targetUrl.includes('cuevana.cz');
     if (isCuevanaPage) {
-      const langPriority = ['Latino', 'Castellano', 'Subtitulado', 'Inglés', 'English'];
-      let gotUrls = false;
-      for (const lang of langPriority) {
-        if (!streamMode && gotUrls) break;
-        if (clientGone) break;
-        try {
-          const langEl = await page.$(`text=${lang}`);
-          if (!langEl) continue;
-          await langEl.click();
-          await page.waitForTimeout(800);
-
-          // Solo botones VISIBLES: `text=REPRODUCIR` devuelve todos los del DOM,
-          // incluidos los de pestañas de otros idiomas ocultas. Procesar esos
-          // tagearía servidores de otro idioma con el idioma de la pestaña actual.
-          const allRepBtns = await page.$$('text=REPRODUCIR');
-          const repBtns = [];
-          for (const b of allRepBtns) {
-            if (await b.isVisible().catch(() => false)) repBtns.push(b);
-          }
-          console.log(`[cuevana] ${lang}: ${repBtns.length}/${allRepBtns.length} visible REPRODUCIR button(s)`);
-
-          for (const btn of repBtns.slice(0, streamMode ? 5 : 3)) {
-            if (clientGone) break;
-            try {
-              const popupUrls = new Set();
-              const [popup] = await Promise.all([
-                context.waitForEvent('page', { timeout: 6000 }),
-                btn.click(),
-              ]);
-
-              popup.on('response', async (resp) => {
-                try {
-                  const u = resp.url();
-                  if (/\.(m3u8|ts|mp4)(\?|$)/i.test(u) || PLAYER_DOMAINS.some(d => u.includes(d))) {
-                    popupUrls.add(u); return;
-                  }
-                  const ct = resp.headers()['content-type'] || '';
-                  if (/video|mpegurl/i.test(ct)) { popupUrls.add(u); return; }
-                  if (/json|text\/(html|plain)/i.test(ct)) {
-                    const text = await resp.text().catch(() => '');
-                    for (const m of text.matchAll(PLAYER_REGEX)) popupUrls.add(m[1]);
-                  }
-                } catch {}
-              });
-
-              await popup.waitForLoadState('domcontentloaded', { timeout: 12000 }).catch(() => {});
-
-              // Poll until an inner player URL appears, up to 8s
-              for (let i = 0; i < 16; i++) {
-                await popup.waitForTimeout(500);
-                if ([...popupUrls].some(u => INNER_PLAYER_DOMAINS.some(d => u.includes(d)))) break;
-              }
-
-              const popupHtml = await popup.content().catch(() => '');
-              for (const u of extractFromHtml(popupHtml)) {
-                if (!/\.(js|css)(\?|$)/.test(u)) popupUrls.add(u);
-              }
-              await popup.close().catch(() => {});
-
-              // Prefer inner player URLs (streamtape/filemoon/etc) over video.cuevana.cz wrapper
-              const innerPopupUrls = [...popupUrls].filter(u => INNER_PLAYER_DOMAINS.some(d => u.includes(d)));
-              const finalPopupUrls = innerPopupUrls.length ? innerPopupUrls : [...popupUrls];
-              console.log(`[cuevana] popup (${lang}): ${popupUrls.size} URL(s), ${innerPopupUrls.length} inner`);
-              const lc = LANG_CODES[lang] || 'LAT';
-              for (const u of finalPopupUrls) {
-                if (!urls.has(u)) {
-                  urls.add(u);
-                  if (!urlLangs.has(u)) urlLangs.set(u, lc);
-                  sendSse(u, lc); // stream immediately in SSE mode
-                }
-              }
-              if (urls.size) gotUrls = true;
-              if (!streamMode && gotUrls) break; // non-stream: stop after first success per lang
-            } catch {}
-          }
-        } catch {}
+      const cuevanaHtml = await page.content().catch(() => '');
+      const cuevanaServers = parseCuevanaServers(cuevanaHtml);
+      console.log(`[cuevana] parsed ${cuevanaServers.length} server(s) from DOM`);
+      for (const { url: u, lang } of cuevanaServers) {
+        if (urls.has(u)) continue;
+        urls.add(u);
+        if (lang) urlLangs.set(u, lang);
+        sendSse(u, lang || null);
       }
     }
 
