@@ -512,7 +512,10 @@ app.get('/scrape', async (req, res) => {
 
       targetUrl = foundLink;
       if (season && episode && /\/serie\//.test(targetUrl)) {
-        targetUrl = targetUrl.replace(/\/+$/, '') + `/${season}/${episode}/`;
+        // Cuevana usa /serie/slug/episodio-SxE; el resto /serie/slug/S/E/.
+        targetUrl = targetUrl.replace(/\/+$/, '') + (targetUrl.includes('cuevana.cz')
+          ? `/episodio-${season}x${episode}`
+          : `/${season}/${episode}/`);
         console.log(`[search] episode URL: ${targetUrl}`);
       } else {
         console.log(`[search] found page: ${targetUrl}`);
