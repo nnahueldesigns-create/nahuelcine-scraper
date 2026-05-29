@@ -61,12 +61,14 @@ const PLAYER_DOMAINS = [
   'fembed', 'vidbom', 'embed.su',
   'ok.ru', 'vidlox', 'netu',
   'videobin', 'vidmoly', 'vudeo', 'wishfast', 'streamvid',
+  // Gnula: hqq, dood, streamz / Pelisplus: streamwish, vidhide
+  'hqq', 'dood', 'streamz', 'streamwish', 'vidhide',
   'video.cuevana.cz',
 ];
 
 const INNER_PLAYER_DOMAINS = PLAYER_DOMAINS.filter(d => d !== 'video.cuevana.cz');
 
-const PLAYER_REGEX = /['"](https?:\/\/(?:(?:streamtape|filemoon|voe|vidfast|mp4upload|uqload|upstream|fembed|vidbom|embed\.su|ok\.ru|vidlox|netu|videobin|vidmoly|vudeo|wishfast|streamvid|video\.cuevana\.cz)[^'"<>\s]+))['"]/gi;
+const PLAYER_REGEX = /['"](https?:\/\/(?:(?:streamtape|filemoon|voe|vidfast|mp4upload|uqload|upstream|fembed|vidbom|embed\.su|ok\.ru|vidlox|netu|videobin|vidmoly|vudeo|wishfast|streamvid|hqq\.to|dood|streamz|streamwish|vidhide|video\.cuevana\.cz)[^'"<>\s]+))['"]/gi;
 
 function extractFromHtml(html) {
   const urls = new Set();
@@ -96,6 +98,62 @@ function parseCuevanaServers(html) {
   }
   return out;
 }
+
+// ─── LANGUAGE NORMALIZER ────────────────────────────────────────────────────
+// Texto libre del sitio (label de pestaña, data-name, <em>) → código corto.
+function normalizeLang(text) {
+  if (!text) return null;
+  const t = text.toLowerCase();
+  if (t.includes('latino') || /\blat\b/.test(t)) return 'LAT';
+  if (t.includes('castellano') || t.includes('español') || t.includes('espanol') || /\besp\b/.test(t)) return 'ESP';
+  if (t.includes('subtitul') || t.includes('vose') || /\bsub\b/.test(t) || /\bvos\b/.test(t)) return 'SUB';
+  if (t.includes('ingl') || t.includes('english') || /\beng\b/.test(t)) return 'ENG';
+  return null;
+}
+
+// ─── PELISPLUS SERVER PARSER ────────────────────────────────────────────────
+// Cada server es <li class="...playurl..." data-url="URL" data-name="IDIOMA">.
+// El idioma vive explícito en data-name → parse directo del HTML, sin Playwright.
+function parsePelisplusServers(html) {
+  const out = [];
+  const seen = new Set();
+  for (const m of html.matchAll(/<li\b[^>]*\bplayurl\b[^>]*>/gi)) {
+    const tag = m[0];
+    const urlM = tag.match(/data-url="([^"]+)"/i);
+    if (!urlM) continue;
+    const u = urlM[1];
+    if (!/^https?:\/\//.test(u) || seen.has(u)) continue;
+    seen.add(u);
+    const nameM = tag.match(/data-name="([^"]*)"/i);
+    out.push({ url: u, lang: normalizeLang(nameM?.[1]) });
+  }
+  return out;
+}
+
+// ─── GNULA SERVER PARSER ────────────────────────────────────────────────────
+// El idioma está en un header `<em>opción N, IDIOMA, calidad</em>` que precede
+// a su grupo de iframes. Los iframes cargan lazy (data-lazy-src). Idioma de un
+// server = el del último <em> que aparece ANTES en el HTML (igual que Cuevana).
+const GNULA_PLAYER_RE = /(?:data-lazy-src|data-src|src)="(https?:\/\/(?:hqq\.to|fembed|dood|streamz|streamwish|vidhide|uqload|streamtape|filemoon|voe|mp4upload|streamvid|vidmoly|vudeo)[^"]+)"/gi;
+function parseGnulaServers(html) {
+  const langPos = [...html.matchAll(/<em>\s*opci[oó]n[^,<]*,\s*([^,<]+?)\s*,/gi)]
+    .map(m => ({ lang: normalizeLang(m[1]), pos: m.index }));
+  const out = [];
+  const seen = new Set();
+  for (const m of html.matchAll(GNULA_PLAYER_RE)) {
+    const u = m[1];
+    if (seen.has(u)) continue;
+    seen.add(u);
+    let lang = null;
+    for (const lp of langPos) { if (lp.pos < m.index) lang = lp.lang; else break; }
+    out.push({ url: u, lang });
+  }
+  return out;
+}
+
+// Orden por etiqueta de idioma: LAT primero, luego ESP, SUB, ENG, sin etiqueta.
+const LANG_LABEL_ORDER = { LAT: 0, ESP: 1, SUB: 2, ENG: 3 };
+const langLabelOrder = l => LANG_LABEL_ORDER[l] ?? 4;
 
 const langOrder = u => /[?#&]lang=LAT/i.test(u) ? 0 : /[?#&]lang=VOS/i.test(u) ? 1 : /[?#&]lang=SUB/i.test(u) ? 2 : 3;
 function langFromUrl(u) {
@@ -139,24 +197,42 @@ async function tryHttpFetch(url) {
   }
 }
 
-// HTTP fast path específico de Cuevana: devuelve servers + idioma desde el HTML
-// (data-server + imagen de idioma de su pestaña), sin Playwright.
-async function tryCuevanaHttp(url) {
+// HTTP fast path genérico con parser específico por sitio: trae el HTML una vez
+// y lo pasa a `parser(html)` → [{ url, lang }], sin Playwright. Usado por
+// Cuevana, Pelisplus y Gnula (cada uno con su parser y su Referer).
+async function tryParseHttp(url, parser, referer) {
   try {
     const controller = new AbortController();
     const t = setTimeout(() => controller.abort(), 8000);
     const res = await fetch(url, {
-      headers: { ...STEALTH_HEADERS, 'Referer': 'https://cuevana.cz/' },
+      headers: { ...STEALTH_HEADERS, 'Referer': referer },
       signal: controller.signal,
     });
     clearTimeout(t);
     if (!res.ok) return [];
     const html = await res.text();
     if (html.length < 2000 || html.toLowerCase().includes('just a moment')) return [];
-    return parseCuevanaServers(html); // [{ url, lang }]
+    return parser(html); // [{ url, lang }]
   } catch {
     return [];
   }
+}
+
+// Devuelve servers [{url, lang}] por JSON o SSE, y los cachea. Centraliza la
+// respuesta del fast path para Cuevana / Pelisplus / Gnula.
+async function emitServers(res, ckey, servers, streamMode) {
+  const urls = servers.map(s => s.url);
+  const languages = servers.map(s => s.lang || null);
+  await cacheSet(ckey, { urls, languages });
+  if (streamMode) {
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    for (const s of servers) res.write(`data: ${JSON.stringify({ url: s.url, lang: s.lang || null })}\n\n`);
+    res.write('event: done\ndata: {}\n\n');
+    return res.end();
+  }
+  return res.json({ urls, languages });
 }
 
 // ─── CONCURRENCY QUEUE ─────────────────────────────────────────────────────
@@ -261,23 +337,20 @@ app.get('/scrape', async (req, res) => {
   // ─── HTTP FAST PATH ────────────────────────────────────────────────────
   // Only for direct URL requests (not search). Fast, no Playwright overhead.
   if (url && !searchUrl) {
-    // Cuevana: parse del HTML con idioma por pestaña, sin Playwright.
-    if (url.includes('cuevana.cz')) {
-      const servers = await tryCuevanaHttp(url); // [{ url, lang }]
+    // Sitios con parser de idioma propio: traen servers + idioma del HTML, sin
+    // Playwright. Cuevana mantiene su orden (pestañas); Gnula/Pelisplus se
+    // ordenan por idioma (LAT primero).
+    const siteParser =
+      url.includes('cuevana.cz')                                ? { fn: parseCuevanaServers,  ref: 'https://cuevana.cz/',            sort: false, tag: 'cuevana'   } :
+      url.includes('gnula')                                      ? { fn: parseGnulaServers,    ref: 'https://www2.gnula.one/',         sort: true,  tag: 'gnula'     } :
+      (url.includes('pelisplus') || url.includes('pelisplushd')) ? { fn: parsePelisplusServers, ref: 'https://www.pelisplushd.la/',    sort: true,  tag: 'pelisplus' } :
+      null;
+    if (siteParser) {
+      let servers = await tryParseHttp(url, siteParser.fn, siteParser.ref); // [{ url, lang }]
       if (servers.length) {
-        console.log(`[http-fast/cuevana] ${servers.length} server(s) from ${url}`);
-        const urls2 = servers.map(s => s.url);
-        const langs2 = servers.map(s => s.lang);
-        await cacheSet(ckey, { urls: urls2, languages: langs2 });
-        if (streamMode) {
-          res.setHeader('Content-Type', 'text/event-stream');
-          res.setHeader('Cache-Control', 'no-cache');
-          res.setHeader('Connection', 'keep-alive');
-          servers.forEach(s => res.write(`data: ${JSON.stringify({ url: s.url, lang: s.lang })}\n\n`));
-          res.write('event: done\ndata: {}\n\n');
-          return res.end();
-        }
-        return res.json({ urls: urls2, languages: langs2 });
+        if (siteParser.sort) servers = servers.sort((a, b) => langLabelOrder(a.lang) - langLabelOrder(b.lang));
+        console.log(`[http-fast/${siteParser.tag}] ${servers.length} server(s) from ${url}`);
+        return emitServers(res, ckey, servers, streamMode);
       }
     }
     const fastUrls = await tryHttpFetch(url);
@@ -485,6 +558,26 @@ app.get('/scrape', async (req, res) => {
       const cuevanaServers = parseCuevanaServers(cuevanaHtml);
       console.log(`[cuevana] parsed ${cuevanaServers.length} server(s) from DOM`);
       for (const { url: u, lang } of cuevanaServers) {
+        if (urls.has(u)) continue;
+        urls.add(u);
+        if (lang) urlLangs.set(u, lang);
+        sendSse(u, lang || null);
+      }
+    }
+
+    // ─── GNULA / PELISPLUS: PARSE DEL DOM ───────────────────────────────────
+    // Mismo enfoque que Cuevana: el idioma vive en el HTML (data-name en
+    // Pelisplus, <em>opción N, IDIOMA</em> en Gnula), no en la URL. Parsear el
+    // DOM da servers + idioma sin clicks. Sólo si el HTTP fast path no entró
+    // (search fallback) o no devolvió nada.
+    const isGnulaPage     = targetUrl.includes('gnula');
+    const isPelisplusPage = targetUrl.includes('pelisplus') || targetUrl.includes('pelisplushd');
+    if ((isGnulaPage || isPelisplusPage)) {
+      const pageHtml = await page.content().catch(() => '');
+      const parsed = isGnulaPage ? parseGnulaServers(pageHtml) : parsePelisplusServers(pageHtml);
+      parsed.sort((a, b) => langLabelOrder(a.lang) - langLabelOrder(b.lang));
+      console.log(`[${isGnulaPage ? 'gnula' : 'pelisplus'}] parsed ${parsed.length} server(s) from DOM`);
+      for (const { url: u, lang } of parsed) {
         if (urls.has(u)) continue;
         urls.add(u);
         if (lang) urlLangs.set(u, lang);
