@@ -8,6 +8,53 @@ app.use((req, res, next) => { res.setHeader('Cache-Control', 'no-store'); next()
 
 const PORT = process.env.PORT || 3000;
 
+// ─── SHARED CACHE (Upstash Redis REST API) ──────────────────────────────────
+// Cache compartida y persistente: el primer scrape de un título lo guarda, los
+// demás lo reciben sin Playwright. Si faltan las env vars, degrada silencioso
+// (cacheGet→null, cacheSet→no-op) y el server funciona igual que sin cache.
+const REDIS_URL   = process.env.UPSTASH_REDIS_REST_URL || '';
+const REDIS_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN || '';
+const CACHE_TTL   = parseInt(process.env.CACHE_TTL_SECONDS || '345600', 10); // 4 días
+const CACHE_ON    = !!(REDIS_URL && REDIS_TOKEN);
+console.log(`[cache] ${CACHE_ON ? 'ON (Upstash)' : 'OFF (sin env vars)'} ttl=${CACHE_TTL}s`);
+
+function cacheKey(q) {
+  return 'scrape:' + [q.url || q.searchUrl || '', q.season || '', q.episode || '', q.sectionFilter || '', q.titleSlug || ''].join('|');
+}
+
+async function cacheGet(key) {
+  if (!CACHE_ON) return null;
+  try {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 2500);
+    const r = await fetch(`${REDIS_URL}/get/${encodeURIComponent(key)}`, {
+      headers: { Authorization: `Bearer ${REDIS_TOKEN}` },
+      signal: ctrl.signal,
+    });
+    clearTimeout(t);
+    if (!r.ok) return null;
+    const data = await r.json();        // { result: "<json-string|null>" }
+    if (!data.result) return null;
+    return JSON.parse(data.result);     // { urls, languages }
+  } catch { return null; }
+}
+
+async function cacheSet(key, value) {
+  if (!CACHE_ON || !value?.urls?.length) return; // no cachear vacío → permite reintentar
+  try {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 2500);
+    await fetch(`${REDIS_URL}/set/${encodeURIComponent(key)}?EX=${CACHE_TTL}`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${REDIS_TOKEN}`, 'Content-Type': 'text/plain' },
+      body: JSON.stringify(value),
+      signal: ctrl.signal,
+    });
+    clearTimeout(t);
+    console.log(`[cache] SET ${key} (${value.urls.length} URL)`);
+  } catch {}
+}
+
 const PLAYER_DOMAINS = [
   'streamtape', 'filemoon', 'voe',
   'vidfast', 'mp4upload', 'uqload', 'upstream',
@@ -148,6 +195,26 @@ app.get('/scrape', async (req, res) => {
   const streamMode = req.query.stream === '1';
   if (!url && !searchUrl) return res.status(400).json({ error: 'url or searchUrl required' });
 
+  // ─── SHARED CACHE READ ──────────────────────────────────────────────────
+  // ?fresh=1 saltea la lectura (re-scrape) pero igual reescribe la entrada.
+  const ckey  = cacheKey(req.query);
+  const fresh = req.query.fresh === '1';
+  if (!fresh) {
+    const hit = await cacheGet(ckey);
+    if (hit?.urls?.length) {
+      console.log(`[cache] HIT ${ckey} (${hit.urls.length})`);
+      if (streamMode) {
+        res.setHeader('Content-Type', 'text/event-stream');
+        res.setHeader('Cache-Control', 'no-cache');
+        res.setHeader('Connection', 'keep-alive');
+        hit.urls.forEach((u, i) => res.write(`data: ${JSON.stringify({ url: u, lang: hit.languages?.[i] || null })}\n\n`));
+        res.write('event: done\ndata: {}\n\n');
+        return res.end();
+      }
+      return res.json({ urls: hit.urls, languages: hit.languages || [] });
+    }
+  }
+
   // ─── HTTP FAST PATH ────────────────────────────────────────────────────
   // Only for direct URL requests (not search). Fast, no Playwright overhead.
   if (url && !searchUrl) {
@@ -155,6 +222,7 @@ app.get('/scrape', async (req, res) => {
     if (fastUrls.length) {
       console.log(`[http-fast] ${fastUrls.length} URL(s) from ${url}`);
       const sortedFast = fastUrls.sort((a, b) => langOrder(a) - langOrder(b));
+      await cacheSet(ckey, { urls: sortedFast, languages: sortedFast.map(langFromUrl) });
       if (streamMode) {
         res.setHeader('Content-Type', 'text/event-stream');
         res.setHeader('Cache-Control', 'no-cache');
@@ -183,11 +251,16 @@ app.get('/scrape', async (req, res) => {
   const urlLangs = new Map();
   const LANG_CODES = { 'Latino': 'LAT', 'Castellano': 'ESP', 'Subtitulado': 'SUB', 'Inglés': 'ENG', 'Ingles': 'ENG', 'English': 'ENG' };
 
+  // Acumular lo streameado para escribir el cache al cerrar el stream.
+  const streamedUrls = [];
+  const streamedLangs = [];
   const sendSse = (u, lang) => {
     if (streamMode && !res.writableEnded) res.write(`data: ${JSON.stringify({ url: u, lang })}\n\n`);
+    streamedUrls.push(u); streamedLangs.push(lang || null);
   };
   const doneSse = () => {
     if (streamMode && !res.writableEnded) { res.write('event: done\ndata: {}\n\n'); res.end(); }
+    if (streamedUrls.length) cacheSet(ckey, { urls: streamedUrls, languages: streamedLangs });
   };
 
   const timeoutMs = 55000;
@@ -198,8 +271,9 @@ app.get('/scrape', async (req, res) => {
       const collected = [...urls];
       if (collected.length > 0) {
         const sorted = collected.sort((a, b) => langOrder(a) - langOrder(b));
-        const languages = sorted.map(u => urlLangs.get(u) || langFromUrl(u) || 'LAT');
+        const languages = sorted.map(u => urlLangs.get(u) || langFromUrl(u) || null);
         console.log(`[timeout] returning ${collected.length} partial URL(s)`);
+        cacheSet(ckey, { urls: sorted, languages });
         res.json({ urls: sorted, languages });
       } else {
         res.status(504).json({ error: 'timeout', urls: [] });
@@ -354,8 +428,15 @@ app.get('/scrape', async (req, res) => {
           await langEl.click();
           await page.waitForTimeout(800);
 
-          const repBtns = await page.$$('text=REPRODUCIR');
-          console.log(`[cuevana] ${lang}: ${repBtns.length} REPRODUCIR button(s)`);
+          // Solo botones VISIBLES: `text=REPRODUCIR` devuelve todos los del DOM,
+          // incluidos los de pestañas de otros idiomas ocultas. Procesar esos
+          // tagearía servidores de otro idioma con el idioma de la pestaña actual.
+          const allRepBtns = await page.$$('text=REPRODUCIR');
+          const repBtns = [];
+          for (const b of allRepBtns) {
+            if (await b.isVisible().catch(() => false)) repBtns.push(b);
+          }
+          console.log(`[cuevana] ${lang}: ${repBtns.length}/${allRepBtns.length} visible REPRODUCIR button(s)`);
 
           for (const btn of repBtns.slice(0, streamMode ? 5 : 3)) {
             if (clientGone) break;
@@ -468,19 +549,14 @@ app.get('/scrape', async (req, res) => {
       }
     }
 
-    // For Cuevana URLs without a language tag, detect from page DOM
+    // URLs de Cuevana sin etiqueta de idioma: se dejan SIN tag (null).
+    // Antes se adivinaba por texto del body, pero la página casi siempre contiene
+    // "Latino" (label de pestaña) → tageaba todo como LAT aunque el audio fuera otro.
+    // Mejor sin etiqueta que con una etiqueta mentirosa.
     if (isCuevanaPage) {
       const untagged = [...urls].filter(u => !urlLangs.has(u));
       if (untagged.length) {
-        const pageLangText = await page.evaluate(() => {
-          for (const t of ['Latino', 'Castellano', 'Subtitulado']) {
-            if (document.body?.textContent?.includes(t)) return t;
-          }
-          return null;
-        }).catch(() => null);
-        const detectedLang = LANG_CODES[pageLangText] || 'LAT';
-        console.log(`[cuevana] untagged URLs → detected lang: ${detectedLang}`);
-        for (const u of untagged) urlLangs.set(u, detectedLang);
+        console.log(`[cuevana] ${untagged.length} URL(s) sin idioma confiable → sin etiqueta`);
       }
     }
 
@@ -490,7 +566,8 @@ app.get('/scrape', async (req, res) => {
 
     if (streamMode) { doneSse(); return; }
     const sorted = [...urls].sort((a, b) => langOrder(a) - langOrder(b));
-    const languages = sorted.map(u => urlLangs.get(u) || langFromUrl(u));
+    const languages = sorted.map(u => urlLangs.get(u) || langFromUrl(u) || null);
+    cacheSet(ckey, { urls: sorted, languages });
     res.json({ urls: sorted, languages });
   } catch (err) {
     clearTimeout(timer);
