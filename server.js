@@ -118,7 +118,11 @@ async function mArchive(q) {
   if (q.year && parseInt(q.year, 10) >= 1980) return []; // archive = clasicos/dominio publico
   const qWords = [...new Set([...mWords(q.originalTitle || ''), ...mWords(q.title)])];
   if (!qWords.length) return [];
-  const qstr = `title:(${q.title}) AND mediatype:movies`;
+  // Meter el año en la query es clave: `title:(X)` solo devuelve ruido
+  // (presentaciones, demos, noticias con la palabra); con el año, archive
+  // devuelve el film real. Rango +/-1 por desfasajes de fecha.
+  let qstr = `title:(${q.title}) AND mediatype:movies`;
+  if (q.year) { const y = parseInt(q.year, 10); qstr += ` AND year:[${y - 1} TO ${y + 1}]`; }
   const api = `https://archive.org/advancedsearch.php?q=${encodeURIComponent(qstr)}&fl[]=identifier&fl[]=title&fl[]=year&rows=12&output=json`;
   const j = await mGetJson(api, 'https://archive.org/');
   const docs = j && j.response && j.response.docs || [];
@@ -127,7 +131,7 @@ async function mArchive(q) {
     if (M_ARCHIVE_JUNK.test(d.title || '')) continue;
     const toks = mTokens(d.title || '');
     if (!qWords.every(w => toks.includes(w))) continue; // todas las palabras del título
-    if (q.year && String(d.year || '') !== String(q.year)) continue; // año obligatorio si lo tenemos
+    if (q.year && Math.abs(parseInt(d.year, 10) - parseInt(q.year, 10)) > 1) continue; // año ±1
     const extra = mExtra(toks, qWords);
     if (extra > (qWords.length <= 1 ? 3 : 5)) continue; // título de archive suele traer extra; algo más laxo + año ya filtra
     const sc = 1000 - extra;
