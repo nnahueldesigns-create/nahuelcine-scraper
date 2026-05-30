@@ -81,6 +81,16 @@ function mBest(cands, qWords) {
   return best;
 }
 const mDecAmp = u => u.replace(/&(amp;|#0?38;)/g, '&');
+
+// Año del film según la página (para descartar homónimas de otro año). Prioriza
+// release_date (JSON), luego og:title/title con "(YYYY)".
+function extractPageYear(html) {
+  let m = html.match(/"release_date":"(\d{4})/);
+  if (m) return parseInt(m[1], 10);
+  m = html.match(/property="og:title"[^>]*content="[^"]*\((\d{4})\)/i) || html.match(/<title>[^<]*\((\d{4})\)/i);
+  if (m) return parseInt(m[1], 10);
+  return null;
+}
 const M_ARCHIVE_JUNK = /review|commentary|trailer|demo|sample|clip|reaction|\bfan\b|behind|making|presents|interview|soundtrack|score|\bmix\b|podcast|episode \d|part \d/i;
 
 async function mCinetimes(q) {
@@ -193,7 +203,7 @@ const CACHE_ON    = !!(REDIS_URL && REDIS_TOKEN);
 console.log(`[cache] ${CACHE_ON ? 'ON (Upstash)' : 'OFF (sin env vars)'} ttl=${CACHE_TTL}s`);
 
 function cacheKey(q) {
-  return 'scrape3:' + [q.url || q.searchUrl || '', q.season || '', q.episode || '', q.sectionFilter || '', q.titleSlug || ''].join('|');
+  return 'scrape4:' + [q.url || q.searchUrl || '', q.season || '', q.episode || '', q.sectionFilter || '', q.titleSlug || '', q.year || ''].join('|');
 }
 
 async function cacheGet(key) {
@@ -546,7 +556,19 @@ app.get('/scrape', async (req, res) => {
       url.includes('doramasflix')                                ? { fn: parseDoramasflixServers, ref: 'https://doramasflix.in/',      sort: false, tag: 'doramasflix', skipPlaywright: true, timeout: 5000 } :
       null;
     if (siteParser) {
-      let servers = await tryParseHttp(url, siteParser.fn, siteParser.ref, siteParser.timeout); // [{ url, lang }]
+      const html = await mGetText(url, siteParser.ref, siteParser.timeout || 8000);
+      const okHtml = html && html.length >= 2000 && !html.toLowerCase().includes('just a moment');
+      // Verificación de año: la página puede ser un film homónimo de otro año
+      // (ej. "Los Olvidados" 1950 vs 2017). Si el año de la página no coincide
+      // con el pedido (±1), descartar → no mostrar la peli equivocada.
+      if (okHtml && year) {
+        const py = extractPageYear(html);
+        if (py && Math.abs(py - parseInt(year, 10)) > 1) {
+          console.log(`[http-fast/${siteParser.tag}] año ${py} != ${year} → descarta (homónima)`);
+          return emitServers(res, ckey, [], streamMode);
+        }
+      }
+      let servers = okHtml ? siteParser.fn(html) : [];
       if (servers.length) {
         if (siteParser.sort) servers = servers.sort((a, b) => langLabelOrder(a.lang) - langLabelOrder(b.lang));
         console.log(`[http-fast/${siteParser.tag}] ${servers.length} server(s) from ${url}`);
