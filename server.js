@@ -7,15 +7,133 @@ const { chromium } = require('playwright');
 process.on('uncaughtException', (e) => console.error('[uncaughtException]', e));
 process.on('unhandledRejection', (e) => console.error('[unhandledRejection]', e));
 
-// sources.js se carga lazy dentro de /multi (no en el require de arranque) para
-// que un problema ahí jamás impida que el server levante.
-let _sources = null;
-let _sourcesErr = null;
-function getSources() {
-  if (_sources) return _sources;
-  try { _sources = require('./sources'); }
-  catch (e) { _sourcesErr = String(e && e.stack || e); console.error('[sources] load failed', e); _sources = { resolveSource: async () => [], SOURCES: [] }; }
-  return _sources;
+// ─── FUENTES EXTRA /multi (inline; Railway no copiaba sources.js al contenedor) ─
+// Resolvers HTTP puros: search por título → match → extraer/resolver embed.
+const MULTI_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
+function multiHeaders(referer) {
+  return {
+    'User-Agent': MULTI_UA,
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    'Accept-Language': 'es-AR,es;q=0.9,en;q=0.8',
+    ...(referer ? { Referer: referer } : {}),
+  };
+}
+async function mGetText(url, referer, timeoutMs = 9000) {
+  try {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), timeoutMs);
+    const r = await fetch(url, { headers: multiHeaders(referer), signal: ctrl.signal });
+    clearTimeout(t);
+    if (!r.ok) return '';
+    return await r.text();
+  } catch { return ''; }
+}
+async function mGetJson(url, referer) {
+  const txt = await mGetText(url, referer);
+  try { return JSON.parse(txt); } catch { return null; }
+}
+function mSlug(s) {
+  // NFD descompone acentos; [^a-z0-9\s-] elimina las marcas combinantes.
+  return (s || '').toLowerCase().normalize('NFD')
+    .replace(/[^a-z0-9\s-]/g, '').trim().replace(/\s+/g, '-').replace(/-+/g, '-');
+}
+function mWords(s) { return mSlug(s).split('-').filter(w => w.length > 2); }
+function mLang(t) {
+  if (!t) return null;
+  t = t.toLowerCase();
+  if (t.includes('latino') || /\blat\b/.test(t)) return 'LAT';
+  if (t.includes('castellano') || t.includes('español') || t.includes('espanol') || /\bcas\b/.test(t) || /\besp\b/.test(t)) return 'ESP';
+  if (t.includes('subtitul') || t.includes('vose') || /\bsub\b/.test(t) || /\bvos\b/.test(t)) return 'SUB';
+  if (t.includes('ingl') || t.includes('english') || /\beng\b/.test(t)) return 'ENG';
+  return null;
+}
+function mBest(cands, qWords) {
+  let best = null, bs = 0;
+  for (const c of cands) { const sc = qWords.filter(w => c.toLowerCase().includes(w)).length; if (sc > bs) { bs = sc; best = c; } }
+  return best;
+}
+const mDecAmp = u => u.replace(/&(amp;|#0?38;)/g, '&');
+const M_ARCHIVE_JUNK = /review|commentary|trailer|demo|sample|clip|reaction|\bfan\b|behind|making|presents|interview|soundtrack|score|\bmix\b|podcast|episode \d|part \d/i;
+
+async function mCinetimes(q) {
+  if (q.type === 'tv') return [];
+  const out = [];
+  const qWords = [...new Set([...mWords(q.originalTitle || ''), ...mWords(q.title)])];
+  for (const [sec, lang] of [['es-lat', 'LAT'], ['es', 'ESP']]) {
+    const sh = await mGetText(`https://cinetimes.org/${sec}/?s=${encodeURIComponent(q.title)}`, 'https://cinetimes.org/');
+    const slugs = [...new Set([...sh.matchAll(new RegExp(`/${sec}/t/([a-z0-9-]+)`, 'gi'))].map(m => m[1]))];
+    const best = mBest(slugs, qWords);
+    if (!best) continue;
+    const ph = await mGetText(`https://cinetimes.org/${sec}/t/${best}`, `https://cinetimes.org/${sec}/`);
+    const m = ph.match(/src="(https:\/\/www\.youtube\.com\/embed\/[^"]+|https:\/\/archive\.org\/embed\/[^"]+|https:\/\/[^"]*dailymotion[^"]+)"/i);
+    if (m) out.push({ url: mDecAmp(m[1]), lang });
+  }
+  return out;
+}
+async function mRetinalatina(q) {
+  if (q.type === 'tv') return [];
+  const qWords = [...new Set([...mWords(q.originalTitle || ''), ...mWords(q.title)])];
+  const sh = await mGetText(`https://www.retinalatina.org/?s=${encodeURIComponent(q.title)}`, 'https://www.retinalatina.org/');
+  const slugs = [...new Set([...sh.matchAll(/\/peliculas\/([a-z0-9-]+)\//gi)].map(m => m[1]))];
+  const best = mBest(slugs, qWords);
+  if (!best) return [];
+  const ph = await mGetText(`https://www.retinalatina.org/peliculas/${best}/`, 'https://www.retinalatina.org/');
+  const m = ph.match(/src="(https:\/\/player\.instantvideocloud\.net\/[^"]+)"/i);
+  return m ? [{ url: mDecAmp(m[1]), lang: 'LAT' }] : [];
+}
+async function mArchive(q) {
+  if (q.type === 'tv') return [];
+  if (q.year && parseInt(q.year, 10) >= 1980) return []; // archive = clasicos/dominio publico
+  const qWords = [...new Set([...mWords(q.originalTitle || ''), ...mWords(q.title)])];
+  if (!qWords.length) return [];
+  const qstr = `title:(${q.title}) AND mediatype:movies`;
+  const api = `https://archive.org/advancedsearch.php?q=${encodeURIComponent(qstr)}&fl[]=identifier&fl[]=title&fl[]=year&rows=12&output=json`;
+  const j = await mGetJson(api, 'https://archive.org/');
+  const docs = j && j.response && j.response.docs || [];
+  let best = null, bs = 0;
+  for (const d of docs) {
+    if (M_ARCHIVE_JUNK.test(d.title || '')) continue;
+    const text = (d.title || '').toLowerCase();
+    const matched = qWords.filter(w => text.includes(w)).length;
+    if (matched < qWords.length) continue;
+    const sc = matched + (q.year && String(d.year || '') === String(q.year) ? 2 : 0);
+    if (sc > bs) { bs = sc; best = d; }
+  }
+  if (!best) return [];
+  return [{ url: `https://archive.org/embed/${best.identifier}`, lang: null }];
+}
+async function mPelicinehd(q) {
+  if (q.type === 'tv') return [];
+  const qWords = [...new Set([...mWords(q.originalTitle || ''), ...mWords(q.title)])];
+  const sh = await mGetText(`https://pelicinehd.com/?s=${encodeURIComponent(q.title)}`, 'https://pelicinehd.com/');
+  const slugs = [...new Set([...sh.matchAll(/\/movies\/([a-z0-9-]+)\//gi)].map(m => m[1]))];
+  const best = mBest(slugs, qWords);
+  if (!best) return [];
+  const page = `https://pelicinehd.com/movies/${best}/`;
+  const ph = await mGetText(page, 'https://pelicinehd.com/');
+  const tabLangs = [...ph.matchAll(/href="#options?[^"]*"[^>]*>([\s\S]*?)<\/a>/gi)].map(m => mLang(m[1]));
+  const tm = ph.match(/trid=(\d+)/i);
+  if (!tm) return [];
+  const trid = tm[1];
+  const count = tabLangs.length || 3;
+  const out = [], seen = new Set();
+  for (let n = 0; n < count; n++) {
+    const th = await mGetText(`https://pelicinehd.com/?trembed=${n}&trid=${trid}&trtype=1`, page);
+    const m = th.match(/<iframe[^>]*src="(https?:\/\/[^"]+)"/i);
+    if (!m) continue;
+    const u = mDecAmp(m[1]);
+    if (/youtube|trembed|pelicinehd\.com/i.test(u) || seen.has(u)) continue;
+    seen.add(u);
+    out.push({ url: u, lang: tabLangs[n] || null });
+  }
+  return out;
+}
+const MULTI_RESOLVERS = { cinetimes: mCinetimes, retinalatina: mRetinalatina, archive: mArchive, pelicinehd: mPelicinehd };
+const SOURCES = Object.keys(MULTI_RESOLVERS);
+async function resolveSource(src, q) {
+  const fn = MULTI_RESOLVERS[src];
+  if (!fn) return [];
+  try { return await fn(q); } catch (e) { console.error(`[multi/${src}]`, e); return []; }
 }
 
 const app = express();
@@ -730,11 +848,9 @@ app.get('/scrape', async (req, res) => {
 // Resuelven todo server-side por HTTP (search → match → embed), sin Playwright.
 // Reciben el título (no una URL) porque sus slugs no son predecibles.
 app.get('/multi', async (req, res) => {
-  const { resolveSource, SOURCES } = getSources();
-  if (req.query.diag === '1') return res.json({ SOURCES, sourcesErr: _sourcesErr });
   const { src, title, originalTitle, year, type, season, episode } = req.query;
   if (!src || !SOURCES.includes(src) || !title) {
-    return res.status(400).json({ urls: [], error: 'src+title required', sourcesErr: _sourcesErr });
+    return res.status(400).json({ urls: [], error: 'src+title required' });
   }
   const keyTitle = (originalTitle || title).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/-+/g, '-');
   const ckey = `multi2:${src}:${type || 'movie'}:${keyTitle}:${year || ''}:${season || ''}:${episode || ''}`;
