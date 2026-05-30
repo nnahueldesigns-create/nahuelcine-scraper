@@ -37,8 +37,11 @@ async function getJson(url, referer) {
 }
 
 function slugify(s) {
+  // NFD descompone acentos (e + combinante); el filtro [^a-z0-9\s-] de abajo ya
+  // elimina las marcas combinantes, asi que no hace falta un regex de diacriticos
+  // (evitamos meter caracteres multibyte en el source).
   return (s || '').toLowerCase()
-    .normalize('NFD').replace(/[̀-ͯ]/g, '')
+    .normalize('NFD')
     .replace(/[^a-z0-9\s-]/g, '').trim()
     .replace(/\s+/g, '-').replace(/-+/g, '-');
 }

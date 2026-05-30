@@ -10,10 +10,11 @@ process.on('unhandledRejection', (e) => console.error('[unhandledRejection]', e)
 // sources.js se carga lazy dentro de /multi (no en el require de arranque) para
 // que un problema ahí jamás impida que el server levante.
 let _sources = null;
+let _sourcesErr = null;
 function getSources() {
   if (_sources) return _sources;
   try { _sources = require('./sources'); }
-  catch (e) { console.error('[sources] load failed', e); _sources = { resolveSource: async () => [], SOURCES: [] }; }
+  catch (e) { _sourcesErr = String(e && e.stack || e); console.error('[sources] load failed', e); _sources = { resolveSource: async () => [], SOURCES: [] }; }
   return _sources;
 }
 
@@ -730,9 +731,10 @@ app.get('/scrape', async (req, res) => {
 // Reciben el título (no una URL) porque sus slugs no son predecibles.
 app.get('/multi', async (req, res) => {
   const { resolveSource, SOURCES } = getSources();
+  if (req.query.diag === '1') return res.json({ SOURCES, sourcesErr: _sourcesErr });
   const { src, title, originalTitle, year, type, season, episode } = req.query;
   if (!src || !SOURCES.includes(src) || !title) {
-    return res.status(400).json({ urls: [], error: 'src+title required' });
+    return res.status(400).json({ urls: [], error: 'src+title required', sourcesErr: _sourcesErr });
   }
   const keyTitle = (originalTitle || title).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/-+/g, '-');
   const ckey = `multi2:${src}:${type || 'movie'}:${keyTitle}:${year || ''}:${season || ''}:${episode || ''}`;
