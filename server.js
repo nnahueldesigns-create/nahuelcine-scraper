@@ -53,9 +53,31 @@ function mLang(t) {
   if (t.includes('ingl') || t.includes('english') || /\beng\b/.test(t)) return 'ENG';
   return null;
 }
+function mTokens(s) {
+  return (s || '').toLowerCase().normalize('NFD').replace(/[^a-z0-9\s-]/g, ' ').split(/[\s-]+/).filter(Boolean);
+}
+// Match estricto: el candidato debe contener TODAS las palabras distintivas del
+// query (match por palabra exacta, no substring → evita "olvidados" dentro de
+// "héroes olvidados" como única coincidencia... bueno, eso lo filtra el conteo de
+// extras). Desempata por MENOS palabras extra (prefiere el slug que es casi solo
+// el título, ej. "los-olvidados-1950" sobre "ultimos-zapatistas-heroes-olvidados").
+function mExtra(toks, qWords) {
+  return toks.filter(w => w.length > 2 && !qWords.includes(w) && !/^\d{4}$/.test(w)).length;
+}
 function mBest(cands, qWords) {
-  let best = null, bs = 0;
-  for (const c of cands) { const sc = qWords.filter(w => c.toLowerCase().includes(w)).length; if (sc > bs) { bs = sc; best = c; } }
+  if (!qWords.length) return null;
+  // Títulos de 1 palabra distintiva son ambiguos: limitar relleno del slug a 1
+  // palabra extra (rechaza ".../olvidados-director-nombre"). Multi-palabra: laxo.
+  const maxExtra = qWords.length <= 1 ? 1 : 3;
+  let best = null, bs = -1;
+  for (const c of cands) {
+    const toks = mTokens(c);
+    if (!qWords.every(w => toks.includes(w))) continue;
+    const extra = mExtra(toks, qWords);
+    if (extra > maxExtra) continue;
+    const sc = 1000 - extra;
+    if (sc > bs) { bs = sc; best = c; }
+  }
   return best;
 }
 const mDecAmp = u => u.replace(/&(amp;|#0?38;)/g, '&');
@@ -79,6 +101,10 @@ async function mCinetimes(q) {
 async function mRetinalatina(q) {
   if (q.type === 'tv') return [];
   const qWords = [...new Set([...mWords(q.originalTitle || ''), ...mWords(q.title)])];
+  // Sin año confiable en slug ni página (la página lista decenas de años). Para
+  // no matchear mal, exigir título de >=2 palabras distintivas (los de 1 palabra
+  // son ambiguos, ej. "olvidados" pegaba a otro film indie → pantalla negra).
+  if (qWords.length < 2) return [];
   const sh = await mGetText(`https://www.retinalatina.org/?s=${encodeURIComponent(q.title)}`, 'https://www.retinalatina.org/');
   const slugs = [...new Set([...sh.matchAll(/\/peliculas\/([a-z0-9-]+)\//gi)].map(m => m[1]))];
   const best = mBest(slugs, qWords);
@@ -96,13 +122,15 @@ async function mArchive(q) {
   const api = `https://archive.org/advancedsearch.php?q=${encodeURIComponent(qstr)}&fl[]=identifier&fl[]=title&fl[]=year&rows=12&output=json`;
   const j = await mGetJson(api, 'https://archive.org/');
   const docs = j && j.response && j.response.docs || [];
-  let best = null, bs = 0;
+  let best = null, bs = -1;
   for (const d of docs) {
     if (M_ARCHIVE_JUNK.test(d.title || '')) continue;
-    const text = (d.title || '').toLowerCase();
-    const matched = qWords.filter(w => text.includes(w)).length;
-    if (matched < qWords.length) continue;
-    const sc = matched + (q.year && String(d.year || '') === String(q.year) ? 2 : 0);
+    const toks = mTokens(d.title || '');
+    if (!qWords.every(w => toks.includes(w))) continue; // todas las palabras del título
+    if (q.year && String(d.year || '') !== String(q.year)) continue; // año obligatorio si lo tenemos
+    const extra = mExtra(toks, qWords);
+    if (extra > (qWords.length <= 1 ? 3 : 5)) continue; // título de archive suele traer extra; algo más laxo + año ya filtra
+    const sc = 1000 - extra;
     if (sc > bs) { bs = sc; best = d; }
   }
   if (!best) return [];
@@ -110,6 +138,8 @@ async function mArchive(q) {
 }
 async function mPelicinehd(q) {
   if (q.type === 'tv') return [];
+  // pelicinehd = estrenos modernos; una peli vieja no está → evita match basura.
+  if (q.year && parseInt(q.year, 10) < 2000) return [];
   const qWords = [...new Set([...mWords(q.originalTitle || ''), ...mWords(q.title)])];
   const sh = await mGetText(`https://pelicinehd.com/?s=${encodeURIComponent(q.title)}`, 'https://pelicinehd.com/');
   const slugs = [...new Set([...sh.matchAll(/\/movies\/([a-z0-9-]+)\//gi)].map(m => m[1]))];
@@ -859,7 +889,7 @@ app.get('/multi', async (req, res) => {
     return res.status(400).json({ urls: [], error: 'src+title required' });
   }
   const keyTitle = (originalTitle || title).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/-+/g, '-');
-  const ckey = `multi2:${src}:${type || 'movie'}:${keyTitle}:${year || ''}:${season || ''}:${episode || ''}`;
+  const ckey = `multi3:${src}:${type || 'movie'}:${keyTitle}:${year || ''}:${season || ''}:${episode || ''}`;
   if (req.query.fresh !== '1') {
     const hit = await cacheGet(ckey);
     if (hit?.urls?.length) {
