@@ -239,7 +239,7 @@ const CACHE_ON    = !!(REDIS_URL && REDIS_TOKEN);
 console.log(`[cache] ${CACHE_ON ? 'ON (Upstash)' : 'OFF (sin env vars)'} ttl=${CACHE_TTL}s`);
 
 function cacheKey(q) {
-  return 'scrape4:' + [q.url || q.searchUrl || '', q.season || '', q.episode || '', q.sectionFilter || '', q.titleSlug || '', q.year || ''].join('|');
+  return 'scrape5:' + [q.url || q.searchUrl || '', q.season || '', q.episode || '', q.sectionFilter || '', q.titleSlug || '', q.year || ''].join('|');
 }
 
 async function cacheGet(key) {
@@ -816,6 +816,22 @@ app.get('/scrape', async (req, res) => {
     const isGnulaPage      = targetUrl.includes('gnula');
     const isPelisplusPage  = targetUrl.includes('pelisplus') || targetUrl.includes('pelisplushd');
     const isParsedSite     = isCuevanaPage || isGnulaPage || isPelisplusPage;
+
+    // YEAR-GATE (ruta search/Playwright): el search puede caer en una homónima de
+    // otro año (ej. "El baño del Papa" → otro film). Si la página tiene año y no
+    // coincide con el pedido, descartamos todo (mejor vacío → fallback que peli
+    // equivocada). El fast-path ya tiene su propio gate.
+    if (isParsedSite && year) {
+      const yh = await page.content().catch(() => '');
+      const py = extractPageYear(yh);
+      if (py && Math.abs(py - parseInt(year, 10)) > 1) {
+        console.log(`[search] página año ${py} != ${year} → homónima, descarto`);
+        clearTimeout(timer);
+        await context.close().catch(() => {});
+        if (streamMode) { doneSse(); return; }
+        return res.json({ urls: [], languages: [] });
+      }
+    }
 
     let iframeSrcs = [];
     if (!isParsedSite) {
