@@ -194,6 +194,21 @@ async function okruSearch(term) {
     seen.add(idm[1]);
     out.push({ id: idm[1], title: (title || '').replace(/<[^>]+>/g, ' ').replace(/&[a-z#0-9]+;/gi, ' ').replace(/\s+/g, ' ').trim() });
   };
+  // 1) Brave Search API (si hay key): 1 sola key, confiable, no throttlea.
+  const brave = process.env.BRAVE_KEY;
+  if (brave) {
+    try {
+      const ctrl = new AbortController();
+      const t = setTimeout(() => ctrl.abort(), 9000);
+      const r = await fetch(`https://api.search.brave.com/res/v1/web/search?count=10&q=${encodeURIComponent('site:ok.ru/video ' + term)}`,
+        { headers: { Accept: 'application/json', 'X-Subscription-Token': brave }, signal: ctrl.signal });
+      clearTimeout(t);
+      const j = r.ok ? await r.json() : null;
+      for (const it of (j && j.web && j.web.results) || []) push(it.url, it.title);
+    } catch {}
+    if (out.length) return out;
+  }
+  // 2) Google CSE (si hay key+cx).
   const key = process.env.GOOGLE_CSE_KEY, cx = process.env.GOOGLE_CSE_CX;
   if (key && cx) {
     // El buscador CSE ya está restringido a ok.ru/* → query con el título plano
