@@ -19,7 +19,7 @@ const CACHE_ON    = !!(REDIS_URL && REDIS_TOKEN);
 console.log(`[cache] ${CACHE_ON ? 'ON (Upstash)' : 'OFF (sin env vars)'} ttl=${CACHE_TTL}s`);
 
 function cacheKey(q) {
-  return 'scrape:' + [q.url || q.searchUrl || '', q.season || '', q.episode || '', q.sectionFilter || '', q.titleSlug || ''].join('|');
+  return 'scrape2:' + [q.url || q.searchUrl || '', q.season || '', q.episode || '', q.sectionFilter || '', q.titleSlug || ''].join('|');
 }
 
 async function cacheGet(key) {
