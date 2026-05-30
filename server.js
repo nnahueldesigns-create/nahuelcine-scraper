@@ -54,7 +54,11 @@ function mLang(t) {
   return null;
 }
 function mTokens(s) {
-  return (s || '').toLowerCase().normalize('NFD').replace(/[^a-z0-9\s-]/g, ' ').split(/[\s-]+/).filter(Boolean);
+  // Reusa mSlug (NFD + filtro a-z0-9, quita acentos sin partir la palabra) y
+  // separa por '-'. Antes reemplazaba la tilde combinante por espacio → "baño"
+  // quedaba ["ban","o"] y no matcheaba "bano" (lo que sí produce mSlug). Bug
+  // grave para todo título acentuado.
+  return mSlug(s).split('-').filter(Boolean);
 }
 // Match estricto: el candidato debe contener TODAS las palabras distintivas del
 // query (match por palabra exacta, no substring → evita "olvidados" dentro de
