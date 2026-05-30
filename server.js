@@ -212,7 +212,9 @@ async function mOkru(q) {
   return [{ url: `https://ok.ru/videoembed/${best.id}`, lang: null }];
 }
 
-const MULTI_RESOLVERS = { cinetimes: mCinetimes, retinalatina: mRetinalatina, archive: mArchive, pelicinehd: mPelicinehd, okru: mOkru };
+// retinalatina removida: geo-bloquea AR/UY (target) → embeds en negro. El
+// resolver queda definido pero fuera del dispatch.
+const MULTI_RESOLVERS = { cinetimes: mCinetimes, archive: mArchive, pelicinehd: mPelicinehd, okru: mOkru };
 const SOURCES = Object.keys(MULTI_RESOLVERS);
 async function resolveSource(src, q) {
   const fn = MULTI_RESOLVERS[src];
