@@ -19,7 +19,7 @@ const CACHE_ON    = !!(REDIS_URL && REDIS_TOKEN);
 console.log(`[cache] ${CACHE_ON ? 'ON (Upstash)' : 'OFF (sin env vars)'} ttl=${CACHE_TTL}s`);
 
 function cacheKey(q) {
-  return 'scrape2:' + [q.url || q.searchUrl || '', q.season || '', q.episode || '', q.sectionFilter || '', q.titleSlug || ''].join('|');
+  return 'scrape3:' + [q.url || q.searchUrl || '', q.season || '', q.episode || '', q.sectionFilter || '', q.titleSlug || ''].join('|');
 }
 
 async function cacheGet(key) {
@@ -58,9 +58,11 @@ async function cacheSet(key, value) {
 const PLAYER_DOMAINS = [
   'streamtape', 'filemoon', 'voe',
   'vidfast', 'mp4upload', 'uqload', 'upstream',
-  'fembed', 'vidbom', 'embed.su',
-  'ok.ru', 'vidlox', 'netu',
+  'embed.su',
+  'ok.ru',
   'videobin', 'vidmoly', 'vudeo', 'wishfast', 'streamvid',
+  // Removidos (hosts muertos → servers que no reproducen): fembed, vidbom,
+  // vidlox, netu (cerraron). Si reaparece alguno vivo, re-agregar.
   // Gnula: hqq, dood, streamz / Pelisplus: streamwish, vidhide
   'hqq', 'dood', 'streamz', 'streamwish', 'vidhide',
   // Doramasflix: watchsb / streamsb
@@ -70,7 +72,7 @@ const PLAYER_DOMAINS = [
 
 const INNER_PLAYER_DOMAINS = PLAYER_DOMAINS.filter(d => d !== 'video.cuevana.cz');
 
-const PLAYER_REGEX = /['"](https?:\/\/(?:(?:streamtape|filemoon|voe|vidfast|mp4upload|uqload|upstream|fembed|vidbom|embed\.su|ok\.ru|vidlox|netu|videobin|vidmoly|vudeo|wishfast|streamvid|hqq\.to|dood|streamz|streamwish|vidhide|watchsb|streamsb|video\.cuevana\.cz)[^'"<>\s]+))['"]/gi;
+const PLAYER_REGEX = /['"](https?:\/\/(?:(?:streamtape|filemoon|voe|vidfast|mp4upload|uqload|upstream|embed\.su|ok\.ru|videobin|vidmoly|vudeo|wishfast|streamvid|hqq\.to|dood|streamz|streamwish|vidhide|watchsb|streamsb|video\.cuevana\.cz)[^'"<>\s]+))['"]/gi;
 
 function extractFromHtml(html) {
   const urls = new Set();
@@ -136,7 +138,7 @@ function parsePelisplusServers(html) {
 // El idioma está en un header `<em>opción N, IDIOMA, calidad</em>` que precede
 // a su grupo de iframes. Los iframes cargan lazy (data-lazy-src). Idioma de un
 // server = el del último <em> que aparece ANTES en el HTML (igual que Cuevana).
-const GNULA_PLAYER_RE = /(?:data-lazy-src|data-src|src)="(https?:\/\/(?:hqq\.to|fembed|dood|streamz|streamwish|vidhide|uqload|streamtape|filemoon|voe|mp4upload|streamvid|vidmoly|vudeo)[^"]+)"/gi;
+const GNULA_PLAYER_RE = /(?:data-lazy-src|data-src|src)="(https?:\/\/(?:hqq\.to|dood|streamz|streamwish|vidhide|uqload|streamtape|filemoon|voe|mp4upload|streamvid|vidmoly|vudeo)[^"]+)"/gi;
 function parseGnulaServers(html) {
   const langPos = [...html.matchAll(/<em>\s*opci[oó]n[^,<]*,\s*([^,<]+?)\s*,/gi)]
     .map(m => ({ lang: normalizeLang(m[1]), pos: m.index }));
