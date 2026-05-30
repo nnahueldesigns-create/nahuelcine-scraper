@@ -186,8 +186,15 @@ async function mOkru(q) {
   if (q.type === 'tv') return [];
   const qWords = [...new Set([...mWords(q.originalTitle || ''), ...mWords(q.title)])];
   if (!qWords.length) return [];
-  const query = `site:ok.ru/video ${q.title}${q.year ? ' ' + q.year : ''}`;
-  const sh = await mGetText(`https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`, 'https://duckduckgo.com/');
+  // Sin año en el query DDG: muchos uploads de ok.ru no lo ponen en el título y
+  // forzarlo bajaba el recall. El año se usa para puntuar el match, no para
+  // filtrar la búsqueda. Probar título y, si no hay, título original.
+  const terms = [...new Set([q.title, q.originalTitle].filter(Boolean))];
+  let sh = '';
+  for (const t of terms) {
+    sh = await mGetText(`https://html.duckduckgo.com/html/?q=${encodeURIComponent(`site:ok.ru/video ${t}`)}`, 'https://duckduckgo.com/');
+    if (sh && /ok\.ru/i.test(sh)) break;
+  }
   if (!sh) return [];
   const results = [];
   const seen = new Set();
