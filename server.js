@@ -63,12 +63,14 @@ const PLAYER_DOMAINS = [
   'videobin', 'vidmoly', 'vudeo', 'wishfast', 'streamvid',
   // Gnula: hqq, dood, streamz / Pelisplus: streamwish, vidhide
   'hqq', 'dood', 'streamz', 'streamwish', 'vidhide',
+  // Doramasflix: watchsb / streamsb
+  'watchsb', 'streamsb',
   'video.cuevana.cz',
 ];
 
 const INNER_PLAYER_DOMAINS = PLAYER_DOMAINS.filter(d => d !== 'video.cuevana.cz');
 
-const PLAYER_REGEX = /['"](https?:\/\/(?:(?:streamtape|filemoon|voe|vidfast|mp4upload|uqload|upstream|fembed|vidbom|embed\.su|ok\.ru|vidlox|netu|videobin|vidmoly|vudeo|wishfast|streamvid|hqq\.to|dood|streamz|streamwish|vidhide|video\.cuevana\.cz)[^'"<>\s]+))['"]/gi;
+const PLAYER_REGEX = /['"](https?:\/\/(?:(?:streamtape|filemoon|voe|vidfast|mp4upload|uqload|upstream|fembed|vidbom|embed\.su|ok\.ru|vidlox|netu|videobin|vidmoly|vudeo|wishfast|streamvid|hqq\.to|dood|streamz|streamwish|vidhide|watchsb|streamsb|video\.cuevana\.cz)[^'"<>\s]+))['"]/gi;
 
 function extractFromHtml(html) {
   const urls = new Set();
@@ -147,6 +149,23 @@ function parseGnulaServers(html) {
     let lang = null;
     for (const lp of langPos) { if (lp.pos < m.index) lang = lp.lang; else break; }
     out.push({ url: u, lang });
+  }
+  return out;
+}
+
+// ─── DORAMASFLIX SERVER PARSER ──────────────────────────────────────────────
+// Sitio Next.js: los players están embebidos en el JSON `__NEXT_DATA__` como
+// pares `"link":"<wrapper fkplayer>","embed":"<host real>"`. Se extrae `embed`
+// (URL limpia del host: ok.ru/videoembed, uqload, watchsb, voe). El idioma NO
+// viene por embed (solo language_code del idioma original) → sin etiqueta.
+function parseDoramasflixServers(html) {
+  const out = [];
+  const seen = new Set();
+  for (const m of html.matchAll(/"embed":"(https?:\/\/[^"]+)"/gi)) {
+    const u = m[1];
+    if (seen.has(u)) continue;
+    seen.add(u);
+    out.push({ url: u, lang: null });
   }
   return out;
 }
@@ -340,10 +359,15 @@ app.get('/scrape', async (req, res) => {
     // Sitios con parser de idioma propio: traen servers + idioma del HTML, sin
     // Playwright. Cuevana mantiene su orden (pestañas); Gnula/Pelisplus se
     // ordenan por idioma (LAT primero).
+    // `skipPlaywright`: si el fast path no devuelve nada, NO cae a Playwright.
+    // Para Doramasflix (Next.js): los embeds siempre están server-rendered en el
+    // __NEXT_DATA__ → si el parse vino vacío, es 404/sin players y Chromium no
+    // ayuda. Evita lanzar browser por cada miss (catálogo general rara vez está ahí).
     const siteParser =
-      url.includes('cuevana.cz')                                ? { fn: parseCuevanaServers,  ref: 'https://cuevana.cz/',            sort: false, tag: 'cuevana'   } :
-      url.includes('gnula')                                      ? { fn: parseGnulaServers,    ref: 'https://www2.gnula.one/',         sort: true,  tag: 'gnula'     } :
-      (url.includes('pelisplus') || url.includes('pelisplushd')) ? { fn: parsePelisplusServers, ref: 'https://www.pelisplushd.la/',    sort: true,  tag: 'pelisplus' } :
+      url.includes('cuevana.cz')                                ? { fn: parseCuevanaServers,    ref: 'https://cuevana.cz/',           sort: false, tag: 'cuevana'   } :
+      url.includes('gnula')                                      ? { fn: parseGnulaServers,      ref: 'https://www2.gnula.one/',       sort: true,  tag: 'gnula'     } :
+      (url.includes('pelisplus') || url.includes('pelisplushd')) ? { fn: parsePelisplusServers,  ref: 'https://www.pelisplushd.la/',   sort: true,  tag: 'pelisplus' } :
+      url.includes('doramasflix')                                ? { fn: parseDoramasflixServers, ref: 'https://doramasflix.in/',      sort: false, tag: 'doramasflix', skipPlaywright: true } :
       null;
     if (siteParser) {
       let servers = await tryParseHttp(url, siteParser.fn, siteParser.ref); // [{ url, lang }]
@@ -351,6 +375,10 @@ app.get('/scrape', async (req, res) => {
         if (siteParser.sort) servers = servers.sort((a, b) => langLabelOrder(a.lang) - langLabelOrder(b.lang));
         console.log(`[http-fast/${siteParser.tag}] ${servers.length} server(s) from ${url}`);
         return emitServers(res, ckey, servers, streamMode);
+      }
+      if (siteParser.skipPlaywright) {
+        console.log(`[http-fast/${siteParser.tag}] 0 server(s), skip Playwright`);
+        return emitServers(res, ckey, [], streamMode);
       }
     }
     const fastUrls = await tryHttpFetch(url);
