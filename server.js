@@ -64,17 +64,27 @@ function mTokens(s) {
 function mExtra(toks, qWords) {
   return toks.filter(w => w.length > 2 && !qWords.includes(w) && !/^\d{4}$/.test(w)).length;
 }
-function mBest(cands, qWords) {
-  if (!qWords.length) return null;
-  // Títulos de 1 palabra distintiva son ambiguos: limitar relleno del slug a 1
-  // palabra extra (rechaza ".../olvidados-director-nombre"). Multi-palabra: laxo.
-  const maxExtra = qWords.length <= 1 ? 1 : 3;
+// Un candidato matchea si contiene TODAS las palabras del título localizado O
+// TODAS las del título original (NO la unión: si el original está en inglés
+// — "A Useful Life" vs "La vida útil" — exigir ambos rechazaría el correcto).
+const mAllIn = (toks, ws) => ws.length > 0 && ws.every(w => toks.includes(w));
+function mMatchLen(toks, tw, ow) {
+  if (mAllIn(toks, tw)) return tw.length;
+  if (mAllIn(toks, ow)) return ow.length;
+  return 0;
+}
+// Mejor candidato: matchea (título u original completo); desempata por MENOS
+// palabras extra. Para títulos de 1 palabra, límite estricto (1 extra).
+function mBest(cands, tw, ow) {
+  const union = [...new Set([...tw, ...ow])];
+  if (!union.length) return null;
   let best = null, bs = -1;
   for (const c of cands) {
     const toks = mTokens(c);
-    if (!qWords.every(w => toks.includes(w))) continue;
-    const extra = mExtra(toks, qWords);
-    if (extra > maxExtra) continue;
+    const mlen = mMatchLen(toks, tw, ow);
+    if (!mlen) continue;
+    const extra = mExtra(toks, union);
+    if (extra > (mlen <= 1 ? 1 : 3)) continue;
     const sc = 1000 - extra;
     if (sc > bs) { bs = sc; best = c; }
   }
@@ -96,11 +106,11 @@ const M_ARCHIVE_JUNK = /review|commentary|trailer|demo|sample|clip|reaction|\bfa
 async function mCinetimes(q) {
   if (q.type === 'tv') return [];
   const out = [];
-  const qWords = [...new Set([...mWords(q.originalTitle || ''), ...mWords(q.title)])];
+  const tw = mWords(q.title), ow = mWords(q.originalTitle || '');
   for (const [sec, lang] of [['es-lat', 'LAT'], ['es', 'ESP']]) {
     const sh = await mGetText(`https://cinetimes.org/${sec}/?s=${encodeURIComponent(q.title)}`, 'https://cinetimes.org/');
     const slugs = [...new Set([...sh.matchAll(new RegExp(`/${sec}/t/([a-z0-9-]+)`, 'gi'))].map(m => m[1]))];
-    const best = mBest(slugs, qWords);
+    const best = mBest(slugs, tw, ow);
     if (!best) continue;
     const ph = await mGetText(`https://cinetimes.org/${sec}/t/${best}`, `https://cinetimes.org/${sec}/`);
     const m = ph.match(/src="(https:\/\/www\.youtube\.com\/embed\/[^"]+|https:\/\/archive\.org\/embed\/[^"]+|https:\/\/[^"]*dailymotion[^"]+)"/i);
@@ -126,8 +136,9 @@ async function mRetinalatina(q) {
 async function mArchive(q) {
   if (q.type === 'tv') return [];
   if (q.year && parseInt(q.year, 10) >= 1980) return []; // archive = clasicos/dominio publico
-  const qWords = [...new Set([...mWords(q.originalTitle || ''), ...mWords(q.title)])];
-  if (!qWords.length) return [];
+  const tw = mWords(q.title), ow = mWords(q.originalTitle || '');
+  const union = [...new Set([...tw, ...ow])];
+  if (!union.length) return [];
   // Meter el año en la query es clave: `title:(X)` solo devuelve ruido
   // (presentaciones, demos, noticias con la palabra); con el año, archive
   // devuelve el film real. Rango +/-1 por desfasajes de fecha.
@@ -140,10 +151,11 @@ async function mArchive(q) {
   for (const d of docs) {
     if (M_ARCHIVE_JUNK.test(d.title || '')) continue;
     const toks = mTokens(d.title || '');
-    if (!qWords.every(w => toks.includes(w))) continue; // todas las palabras del título
+    const mlen = mMatchLen(toks, tw, ow);
+    if (!mlen) continue; // título u original completo
     if (q.year && Math.abs(parseInt(d.year, 10) - parseInt(q.year, 10)) > 1) continue; // año ±1
-    const extra = mExtra(toks, qWords);
-    if (extra > (qWords.length <= 1 ? 3 : 5)) continue; // título de archive suele traer extra; algo más laxo + año ya filtra
+    const extra = mExtra(toks, union);
+    if (extra > (mlen <= 1 ? 3 : 5)) continue; // título de archive suele traer extra; algo más laxo + año ya filtra
     const sc = 1000 - extra;
     if (sc > bs) { bs = sc; best = d; }
   }
@@ -154,10 +166,10 @@ async function mPelicinehd(q) {
   if (q.type === 'tv') return [];
   // pelicinehd = estrenos modernos; una peli vieja no está → evita match basura.
   if (q.year && parseInt(q.year, 10) < 2000) return [];
-  const qWords = [...new Set([...mWords(q.originalTitle || ''), ...mWords(q.title)])];
+  const tw = mWords(q.title), ow = mWords(q.originalTitle || '');
   const sh = await mGetText(`https://pelicinehd.com/?s=${encodeURIComponent(q.title)}`, 'https://pelicinehd.com/');
   const slugs = [...new Set([...sh.matchAll(/\/movies\/([a-z0-9-]+)\//gi)].map(m => m[1]))];
-  const best = mBest(slugs, qWords);
+  const best = mBest(slugs, tw, ow);
   if (!best) return [];
   const page = `https://pelicinehd.com/movies/${best}/`;
   const ph = await mGetText(page, 'https://pelicinehd.com/');
@@ -229,8 +241,9 @@ async function okruSearch(term) {
 
 async function mOkru(q) {
   if (q.type === 'tv') return [];
-  const qWords = [...new Set([...mWords(q.originalTitle || ''), ...mWords(q.title)])];
-  if (!qWords.length) return [];
+  const tw = mWords(q.title), ow = mWords(q.originalTitle || '');
+  const union = [...new Set([...tw, ...ow])];
+  if (!union.length) return [];
   // Probar título y, si no hay, título original. El año NO va en la búsqueda
   // (muchos uploads no lo ponen) — se usa sólo para puntuar el match.
   const terms = [...new Set([q.title, q.originalTitle].filter(Boolean))];
@@ -239,12 +252,12 @@ async function mOkru(q) {
     results = await okruSearch(t);
     if (results.length) break;
   }
-  // Mejor match: todas las palabras del título en el resultado; bonus por año.
+  // Mejor match: título u original completo en el resultado; bonus por año.
   let best = null, bs = -1;
   for (const r of results) {
     const toks = mTokens(r.title);
-    if (!qWords.every(w => toks.includes(w))) continue;
-    let sc = 10 - mExtra(toks, qWords) * 0.1;
+    if (!mMatchLen(toks, tw, ow)) continue;
+    let sc = 10 - mExtra(toks, union) * 0.1;
     if (q.year && r.title.includes(String(q.year))) sc += 5;
     if (sc > bs) { bs = sc; best = r; }
   }
