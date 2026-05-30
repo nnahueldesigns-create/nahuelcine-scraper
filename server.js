@@ -219,10 +219,10 @@ async function tryHttpFetch(url) {
 // HTTP fast path genérico con parser específico por sitio: trae el HTML una vez
 // y lo pasa a `parser(html)` → [{ url, lang }], sin Playwright. Usado por
 // Cuevana, Pelisplus y Gnula (cada uno con su parser y su Referer).
-async function tryParseHttp(url, parser, referer) {
+async function tryParseHttp(url, parser, referer, timeoutMs = 8000) {
   try {
     const controller = new AbortController();
-    const t = setTimeout(() => controller.abort(), 8000);
+    const t = setTimeout(() => controller.abort(), timeoutMs);
     const res = await fetch(url, {
       headers: { ...STEALTH_HEADERS, 'Referer': referer },
       signal: controller.signal,
@@ -367,10 +367,10 @@ app.get('/scrape', async (req, res) => {
       url.includes('cuevana.cz')                                ? { fn: parseCuevanaServers,    ref: 'https://cuevana.cz/',           sort: false, tag: 'cuevana'   } :
       url.includes('gnula')                                      ? { fn: parseGnulaServers,      ref: 'https://www2.gnula.one/',       sort: true,  tag: 'gnula'     } :
       (url.includes('pelisplus') || url.includes('pelisplushd')) ? { fn: parsePelisplusServers,  ref: 'https://www.pelisplushd.la/',   sort: true,  tag: 'pelisplus' } :
-      url.includes('doramasflix')                                ? { fn: parseDoramasflixServers, ref: 'https://doramasflix.in/',      sort: false, tag: 'doramasflix', skipPlaywright: true } :
+      url.includes('doramasflix')                                ? { fn: parseDoramasflixServers, ref: 'https://doramasflix.in/',      sort: false, tag: 'doramasflix', skipPlaywright: true, timeout: 5000 } :
       null;
     if (siteParser) {
-      let servers = await tryParseHttp(url, siteParser.fn, siteParser.ref); // [{ url, lang }]
+      let servers = await tryParseHttp(url, siteParser.fn, siteParser.ref, siteParser.timeout); // [{ url, lang }]
       if (servers.length) {
         if (siteParser.sort) servers = servers.sort((a, b) => langLabelOrder(a.lang) - langLabelOrder(b.lang));
         console.log(`[http-fast/${siteParser.tag}] ${servers.length} server(s) from ${url}`);
@@ -573,17 +573,28 @@ app.get('/scrape', async (req, res) => {
       [...document.querySelectorAll('iframe')].map(f => f.getAttribute('src') || f.getAttribute('data-src') || '')
     );
 
-    let iframeSrcs = await getIframeSrcs();
-    for (const src of iframeSrcs) {
-      if (src && PLAYER_DOMAINS.some(d => src.includes(d))) urls.add(src);
+    // Sitios con parser de idioma propio: el parser del DOM es la fuente
+    // autoritativa. Para ellos NO agregamos el iframe del player activo ni las
+    // URLs de red genéricas (vienen sin idioma y, al entrar antes/además del
+    // parser, dejan botones sin etiqueta). Sólo se usan de fallback si el parser
+    // no devolvió nada (más abajo, guardado por !urls.size).
+    const isCuevanaPage   = targetUrl.includes('cuevana.cz');
+    const isGnulaPage      = targetUrl.includes('gnula');
+    const isPelisplusPage  = targetUrl.includes('pelisplus') || targetUrl.includes('pelisplushd');
+    const isParsedSite     = isCuevanaPage || isGnulaPage || isPelisplusPage;
+
+    let iframeSrcs = [];
+    if (!isParsedSite) {
+      iframeSrcs = await getIframeSrcs();
+      for (const src of iframeSrcs) {
+        if (src && PLAYER_DOMAINS.some(d => src.includes(d))) urls.add(src);
+      }
     }
 
     // ─── CUEVANA: PARSE DEL DOM ──────────────────────────────────────────────
     // El idioma de cada server vive en su pestaña (imagen lat/cas/sub/eng.png),
     // NO en la URL (token/v opacos). Parsear el HTML de la página da los servers
-    // CON idioma correcto, sin clicks ni popups → rápido y fiable. (El viejo flujo
-    // de popups era lento y devolvía los mismos wrappers pero sin idioma.)
-    const isCuevanaPage = targetUrl.includes('cuevana.cz');
+    // CON idioma correcto, sin clicks ni popups → rápido y fiable.
     if (isCuevanaPage) {
       const cuevanaHtml = await page.content().catch(() => '');
       const cuevanaServers = parseCuevanaServers(cuevanaHtml);
@@ -597,13 +608,9 @@ app.get('/scrape', async (req, res) => {
     }
 
     // ─── GNULA / PELISPLUS: PARSE DEL DOM ───────────────────────────────────
-    // Mismo enfoque que Cuevana: el idioma vive en el HTML (data-name en
-    // Pelisplus, <em>opción N, IDIOMA</em> en Gnula), no en la URL. Parsear el
-    // DOM da servers + idioma sin clicks. Sólo si el HTTP fast path no entró
-    // (search fallback) o no devolvió nada.
-    const isGnulaPage     = targetUrl.includes('gnula');
-    const isPelisplusPage = targetUrl.includes('pelisplus') || targetUrl.includes('pelisplushd');
-    if ((isGnulaPage || isPelisplusPage)) {
+    // El idioma vive en el HTML (data-name en Pelisplus, <em>opción N, IDIOMA</em>
+    // en Gnula), no en la URL. Parser autoritativo (search fallback).
+    if (isGnulaPage || isPelisplusPage) {
       const pageHtml = await page.content().catch(() => '');
       const parsed = isGnulaPage ? parseGnulaServers(pageHtml) : parsePelisplusServers(pageHtml);
       parsed.sort((a, b) => langLabelOrder(a.lang) - langLabelOrder(b.lang));
@@ -655,8 +662,10 @@ app.get('/scrape', async (req, res) => {
       }
     }
 
-    // Only add network URLs if popup flow didn't already populate urls
-    if (!isCuevanaPage || !urls.size) {
+    // URLs de red: sólo si NO es un sitio con parser propio, o si el parser no
+    // devolvió nada. Para sitios parseados con servers ya cargados, agregar URLs
+    // de red (sin idioma) ensuciaría los botones con servers sin etiqueta.
+    if (!isParsedSite || !urls.size) {
       const innerNetworkUrls = [...networkUrls].filter(u => INNER_PLAYER_DOMAINS.some(d => u.includes(d)));
       const cuevanaNetworkUrls = [...networkUrls].filter(u => u.includes('video.cuevana.cz'));
       for (const u of (innerNetworkUrls.length ? innerNetworkUrls : cuevanaNetworkUrls)) urls.add(u);
