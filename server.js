@@ -182,29 +182,47 @@ async function mPelicinehd(q) {
 // ok.ru no deja buscar por título (search necesita sesión/locale). Pivote: DDG
 // `site:ok.ru/video {título} {año}` mapea título → video ID; embebemos
 // ok.ru/videoembed/{id} (player limpio). Último recurso para films raros.
+// Busca `site:ok.ru/video {term}` y devuelve [{id,title}]. Usa Google CSE si hay
+// credenciales (oficial, no bloquea, 100/día gratis); si no, DuckDuckGo (gratis
+// pero throttlea bajo volumen → da 202). CSE es lo que hace a ok.ru confiable.
+async function okruSearch(term) {
+  const out = [];
+  const seen = new Set();
+  const push = (link, title) => {
+    const idm = (link || '').match(/ok\.ru\/(?:video|videoembed)\/(\d+)/i);
+    if (!idm || seen.has(idm[1])) return;
+    seen.add(idm[1]);
+    out.push({ id: idm[1], title: (title || '').replace(/<[^>]+>/g, ' ').replace(/&[a-z#0-9]+;/gi, ' ').replace(/\s+/g, ' ').trim() });
+  };
+  const key = process.env.GOOGLE_CSE_KEY, cx = process.env.GOOGLE_CSE_CX;
+  if (key && cx) {
+    // El buscador CSE ya está restringido a ok.ru/* → query con el título plano
+    // (agregar `site:ok.ru/video` sobre-restringe y devuelve 0). Filtramos /video
+    // en push(). num=10 para mejor recall.
+    const j = await mGetJson(`https://www.googleapis.com/customsearch/v1?key=${key}&cx=${cx}&num=10&q=${encodeURIComponent(term)}`);
+    for (const it of (j && j.items) || []) push(it.link, it.title);
+    if (out.length) return out;
+  }
+  // DDG no está restringido → necesita el operador site:.
+  const sh = await mGetText(`https://html.duckduckgo.com/html/?q=${encodeURIComponent('site:ok.ru/video ' + term)}`, 'https://duckduckgo.com/');
+  for (const m of sh.matchAll(/uddg=([^"&]+)[^>]*>([\s\S]*?)<\/a>/gi)) {
+    let dec = ''; try { dec = decodeURIComponent(m[1]); } catch { continue; }
+    push(dec, m[2]);
+  }
+  return out;
+}
+
 async function mOkru(q) {
   if (q.type === 'tv') return [];
   const qWords = [...new Set([...mWords(q.originalTitle || ''), ...mWords(q.title)])];
   if (!qWords.length) return [];
-  // Sin año en el query DDG: muchos uploads de ok.ru no lo ponen en el título y
-  // forzarlo bajaba el recall. El año se usa para puntuar el match, no para
-  // filtrar la búsqueda. Probar título y, si no hay, título original.
+  // Probar título y, si no hay, título original. El año NO va en la búsqueda
+  // (muchos uploads no lo ponen) — se usa sólo para puntuar el match.
   const terms = [...new Set([q.title, q.originalTitle].filter(Boolean))];
-  let sh = '';
+  let results = [];
   for (const t of terms) {
-    sh = await mGetText(`https://html.duckduckgo.com/html/?q=${encodeURIComponent(`site:ok.ru/video ${t}`)}`, 'https://duckduckgo.com/');
-    if (sh && /ok\.ru/i.test(sh)) break;
-  }
-  if (!sh) return [];
-  const results = [];
-  const seen = new Set();
-  for (const m of sh.matchAll(/uddg=([^"&]+)[^>]*>([\s\S]*?)<\/a>/gi)) {
-    let dec = ''; try { dec = decodeURIComponent(m[1]); } catch { continue; }
-    const idm = dec.match(/ok\.ru\/(?:video|videoembed)\/(\d+)/i);
-    if (!idm || seen.has(idm[1])) continue;
-    seen.add(idm[1]);
-    const title = m[2].replace(/<[^>]+>/g, ' ').replace(/&[a-z#0-9]+;/gi, ' ').replace(/\s+/g, ' ').trim();
-    results.push({ id: idm[1], title });
+    results = await okruSearch(t);
+    if (results.length) break;
   }
   // Mejor match: todas las palabras del título en el resultado; bonus por año.
   let best = null, bs = -1;
