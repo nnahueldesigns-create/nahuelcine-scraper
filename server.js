@@ -37,7 +37,13 @@ function mSlug(s) {
   return (s || '').toLowerCase().normalize('NFD')
     .replace(/[^a-z0-9\s-]/g, '').trim().replace(/\s+/g, '-').replace(/-+/g, '-');
 }
-function mWords(s) { return mSlug(s).split('-').filter(w => w.length > 2); }
+const M_STOP = new Set(['los','las','una','unos','unas','del','con','por','para','que','los','sus','este','esta','como','mas']);
+function mWords(s) {
+  const all = mSlug(s).split('-').filter(w => w.length > 2);
+  const sig = all.filter(w => !M_STOP.has(w));
+  // Matchear por palabras distintivas; si el título es todo stopwords, usar todas.
+  return sig.length ? sig : all;
+}
 function mLang(t) {
   if (!t) return null;
   t = t.toLowerCase();
