@@ -178,7 +178,41 @@ async function mPelicinehd(q) {
   }
   return out;
 }
-const MULTI_RESOLVERS = { cinetimes: mCinetimes, retinalatina: mRetinalatina, archive: mArchive, pelicinehd: mPelicinehd };
+// ─── OK.RU (vía DuckDuckGo) ───────────────────────────────────────────────────
+// ok.ru no deja buscar por título (search necesita sesión/locale). Pivote: DDG
+// `site:ok.ru/video {título} {año}` mapea título → video ID; embebemos
+// ok.ru/videoembed/{id} (player limpio). Último recurso para films raros.
+async function mOkru(q) {
+  if (q.type === 'tv') return [];
+  const qWords = [...new Set([...mWords(q.originalTitle || ''), ...mWords(q.title)])];
+  if (!qWords.length) return [];
+  const query = `site:ok.ru/video ${q.title}${q.year ? ' ' + q.year : ''}`;
+  const sh = await mGetText(`https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`, 'https://duckduckgo.com/');
+  if (!sh) return [];
+  const results = [];
+  const seen = new Set();
+  for (const m of sh.matchAll(/uddg=([^"&]+)[^>]*>([\s\S]*?)<\/a>/gi)) {
+    let dec = ''; try { dec = decodeURIComponent(m[1]); } catch { continue; }
+    const idm = dec.match(/ok\.ru\/(?:video|videoembed)\/(\d+)/i);
+    if (!idm || seen.has(idm[1])) continue;
+    seen.add(idm[1]);
+    const title = m[2].replace(/<[^>]+>/g, ' ').replace(/&[a-z#0-9]+;/gi, ' ').replace(/\s+/g, ' ').trim();
+    results.push({ id: idm[1], title });
+  }
+  // Mejor match: todas las palabras del título en el resultado; bonus por año.
+  let best = null, bs = -1;
+  for (const r of results) {
+    const toks = mTokens(r.title);
+    if (!qWords.every(w => toks.includes(w))) continue;
+    let sc = 10 - mExtra(toks, qWords) * 0.1;
+    if (q.year && r.title.includes(String(q.year))) sc += 5;
+    if (sc > bs) { bs = sc; best = r; }
+  }
+  if (!best) return [];
+  return [{ url: `https://ok.ru/videoembed/${best.id}`, lang: null }];
+}
+
+const MULTI_RESOLVERS = { cinetimes: mCinetimes, retinalatina: mRetinalatina, archive: mArchive, pelicinehd: mPelicinehd, okru: mOkru };
 const SOURCES = Object.keys(MULTI_RESOLVERS);
 async function resolveSource(src, q) {
   const fn = MULTI_RESOLVERS[src];
