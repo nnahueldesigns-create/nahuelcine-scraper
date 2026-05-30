@@ -1,7 +1,21 @@
 const express = require('express');
 const cors = require('cors');
 const { chromium } = require('playwright');
-const { resolveSource, SOURCES } = require('./sources');
+
+// Red de seguridad: que un error async suelto NO tumbe el proceso (Railway lo
+// marcaría CRASHED y entraría en crash-loop). Solo logueamos.
+process.on('uncaughtException', (e) => console.error('[uncaughtException]', e));
+process.on('unhandledRejection', (e) => console.error('[unhandledRejection]', e));
+
+// sources.js se carga lazy dentro de /multi (no en el require de arranque) para
+// que un problema ahí jamás impida que el server levante.
+let _sources = null;
+function getSources() {
+  if (_sources) return _sources;
+  try { _sources = require('./sources'); }
+  catch (e) { console.error('[sources] load failed', e); _sources = { resolveSource: async () => [], SOURCES: [] }; }
+  return _sources;
+}
 
 const app = express();
 app.use(cors());
@@ -715,6 +729,7 @@ app.get('/scrape', async (req, res) => {
 // Resuelven todo server-side por HTTP (search → match → embed), sin Playwright.
 // Reciben el título (no una URL) porque sus slugs no son predecibles.
 app.get('/multi', async (req, res) => {
+  const { resolveSource, SOURCES } = getSources();
   const { src, title, originalTitle, year, type, season, episode } = req.query;
   if (!src || !SOURCES.includes(src) || !title) {
     return res.status(400).json({ urls: [], error: 'src+title required' });
