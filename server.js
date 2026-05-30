@@ -1,6 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 const { chromium } = require('playwright');
+const { resolveSource, SOURCES } = require('./sources');
 
 const app = express();
 app.use(cors());
@@ -708,6 +709,31 @@ app.get('/scrape', async (req, res) => {
     clearTimeout(timer);
     if (!res.headersSent) res.json({ urls: [] });
   });
+});
+
+// ─── /multi — fuentes extra HTTP (cinetimes, retinalatina, archive, pelicinehd) ─
+// Resuelven todo server-side por HTTP (search → match → embed), sin Playwright.
+// Reciben el título (no una URL) porque sus slugs no son predecibles.
+app.get('/multi', async (req, res) => {
+  const { src, title, originalTitle, year, type, season, episode } = req.query;
+  if (!src || !SOURCES.includes(src) || !title) {
+    return res.status(400).json({ urls: [], error: 'src+title required' });
+  }
+  const keyTitle = (originalTitle || title).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/-+/g, '-');
+  const ckey = `multi2:${src}:${type || 'movie'}:${keyTitle}:${year || ''}:${season || ''}:${episode || ''}`;
+  if (req.query.fresh !== '1') {
+    const hit = await cacheGet(ckey);
+    if (hit?.urls?.length) {
+      console.log(`[multi/${src}] cache HIT ${ckey} (${hit.urls.length})`);
+      return res.json({ urls: hit.urls, languages: hit.languages || [] });
+    }
+  }
+  const servers = await resolveSource(src, { title, originalTitle, year, type, season, episode });
+  if (servers.length) {
+    console.log(`[multi/${src}] ${servers.length} server(s) for "${title}"`);
+    return emitServers(res, ckey, servers, false);
+  }
+  return res.json({ urls: [], languages: [] });
 });
 
 // ─── /extract — HTTP-only direct video URL extraction ─────────────────────────
