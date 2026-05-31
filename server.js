@@ -296,7 +296,7 @@ const CACHE_ON    = !!(REDIS_URL && REDIS_TOKEN);
 console.log(`[cache] ${CACHE_ON ? 'ON (Upstash)' : 'OFF (sin env vars)'} ttl=${CACHE_TTL}s`);
 
 function cacheKey(q) {
-  return 'scrape5:' + [q.url || q.searchUrl || '', q.season || '', q.episode || '', q.sectionFilter || '', q.titleSlug || '', q.year || ''].join('|');
+  return 'scrape6:' + [q.url || q.searchUrl || '', q.season || '', q.episode || '', q.sectionFilter || '', q.titleSlug || '', q.year || ''].join('|');
 }
 
 async function cacheGet(key) {
@@ -348,6 +348,13 @@ const PLAYER_DOMAINS = [
 ];
 
 const INNER_PLAYER_DOMAINS = PLAYER_DOMAINS.filter(d => d !== 'video.cuevana.cz');
+
+// Hosts que NO son reproductores (tracking/ads/social/CDN). Nunca devolverlos
+// como server — ej. l.sharethis.com/pview (pixel de los botones de compartir)
+// se colaba como P1 negro. Whitelist sería frágil (hay players no listados:
+// filelions, hgcloud, etc.), así que filtramos esta basura conocida en la salida.
+const JUNK_HOST = /sharethis|addthis|google-analytics|googletagmanager|googlesyndication|doubleclick|adservice|facebook\.com|fbcdn|disqus|histats|hotjar|cloudflareinsights|onesignal|taboola|outbrain|criteo|quantserve|scorecardresearch|gravatar|gstatic|jsdelivr|cloudflare\.com|recaptcha/i;
+const notJunk = u => u && !JUNK_HOST.test(u);
 
 const PLAYER_REGEX = /['"](https?:\/\/(?:(?:streamtape|filemoon|voe|vidfast|mp4upload|uqload|upstream|embed\.su|ok\.ru|videobin|vidmoly|vudeo|wishfast|streamvid|hqq\.to|dood|streamz|streamwish|vidhide|watchsb|streamsb|video\.cuevana\.cz)[^'"<>\s]+))['"]/gi;
 
@@ -519,6 +526,7 @@ async function tryParseHttp(url, parser, referer, timeoutMs = 8000) {
 // Devuelve servers [{url, lang}] por JSON o SSE, y los cachea. Centraliza la
 // respuesta del fast path para Cuevana / Pelisplus / Gnula.
 async function emitServers(res, ckey, servers, streamMode) {
+  servers = servers.filter(s => notJunk(s.url)); // descartar tracking/ads (sharethis, etc.)
   const urls = servers.map(s => s.url);
   const languages = servers.map(s => s.lang || null);
   await cacheSet(ckey, { urls, languages });
@@ -675,7 +683,7 @@ app.get('/scrape', async (req, res) => {
     const fastUrls = await tryHttpFetch(url);
     if (fastUrls.length) {
       console.log(`[http-fast] ${fastUrls.length} URL(s) from ${url}`);
-      const sortedFast = fastUrls.sort((a, b) => langOrder(a) - langOrder(b));
+      const sortedFast = fastUrls.filter(notJunk).sort((a, b) => langOrder(a) - langOrder(b));
       await cacheSet(ckey, { urls: sortedFast, languages: sortedFast.map(langFromUrl) });
       if (streamMode) {
         res.setHeader('Content-Type', 'text/event-stream');
@@ -709,6 +717,7 @@ app.get('/scrape', async (req, res) => {
   const streamedUrls = [];
   const streamedLangs = [];
   const sendSse = (u, lang) => {
+    if (!notJunk(u)) return; // no emitir tracking/ads
     if (streamMode && !res.writableEnded) res.write(`data: ${JSON.stringify({ url: u, lang })}\n\n`);
     streamedUrls.push(u); streamedLangs.push(lang || null);
   };
@@ -722,7 +731,7 @@ app.get('/scrape', async (req, res) => {
     if (context) await context.close().catch(() => {});
     if (streamMode) { doneSse(); return; }
     if (!res.headersSent) {
-      const collected = [...urls];
+      const collected = [...urls].filter(notJunk);
       if (collected.length > 0) {
         const sorted = collected.sort((a, b) => langOrder(a) - langOrder(b));
         const languages = sorted.map(u => urlLangs.get(u) || langFromUrl(u) || null);
@@ -1001,7 +1010,7 @@ app.get('/scrape', async (req, res) => {
     await context.close();
 
     if (streamMode) { doneSse(); return; }
-    const sorted = [...urls].sort((a, b) => langOrder(a) - langOrder(b));
+    const sorted = [...urls].filter(notJunk).sort((a, b) => langOrder(a) - langOrder(b));
     const languages = sorted.map(u => urlLangs.get(u) || langFromUrl(u) || null);
     cacheSet(ckey, { urls: sorted, languages });
     res.json({ urls: sorted, languages });
