@@ -257,12 +257,17 @@ async function mOkru(q) {
     if (results.length) break;
   }
   // Mejor match: título u original completo en el resultado; bonus por año.
+  const wantY = q.year ? parseInt(q.year, 10) : null;
   let best = null, bs = -1;
   for (const r of results) {
     const toks = mTokens(r.title);
     if (!mMatchLen(toks, tw, ow)) continue;
+    // Year-gate: si el título trae un año y NO coincide (±1) con el pedido,
+    // descartar (homónima de otro año, ej. "Colonia 2015" vs pedido 2008).
+    const ym = r.title.match(/\b(19\d\d|20\d\d)\b/);
+    if (wantY && ym && Math.abs(parseInt(ym[1], 10) - wantY) > 1) continue;
     let sc = 10 - mExtra(toks, union) * 0.1;
-    if (q.year && r.title.includes(String(q.year))) sc += 5;
+    if (wantY && ym && Math.abs(parseInt(ym[1], 10) - wantY) <= 1) sc += 5; // año correcto = preferido
     if (sc > bs) { bs = sc; best = r; }
   }
   if (!best) return [];
@@ -1033,7 +1038,7 @@ app.get('/multi', async (req, res) => {
     return res.status(400).json({ urls: [], error: 'src+title required' });
   }
   const keyTitle = (originalTitle || title).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/-+/g, '-');
-  const ckey = `multi3:${src}:${type || 'movie'}:${keyTitle}:${year || ''}:${season || ''}:${episode || ''}`;
+  const ckey = `multi4:${src}:${type || 'movie'}:${keyTitle}:${year || ''}:${season || ''}:${episode || ''}`;
   if (req.query.fresh !== '1') {
     const hit = await cacheGet(ckey);
     if (hit?.urls?.length) {
