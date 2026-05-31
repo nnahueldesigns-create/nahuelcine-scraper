@@ -118,7 +118,7 @@ function extractPageYear(html) {
 const M_ARCHIVE_JUNK = /review|commentary|trailer|demo|sample|clip|reaction|\bfan\b|behind|making|presents|interview|soundtrack|score|\bmix\b|podcast|episode \d|part \d/i;
 // Títulos de ok.ru que NO son la peli completa (clips/extras/promo). Si aparecen
 // se descarta el resultado, ej. "Wayne's World (1992) Extreme close-up".
-const OKRU_CLIP = /close[\s-]?up|trailer|te[áa]ser|\bclip\b|\bescena\b|\bscene\b|detr[áa]s|behind the scene|making of|c[óo]mo se hizo|blooper|gag reel|fragmento|recap|resumen|reacci[óo]n|reaction|review|an[áa]lisis|best of|banda sonora|soundtrack|\bost\b|deleted|bonus|featurette|primeros \d+ min/i;
+const OKRU_CLIP = /close[\s-]?up|trailer|te[áa]ser|\bclip\b|\bescena\b|\bscene\b|detr[áa]s|behind the scene|making of|c[óo]mo se hizo|blooper|gag reel|fragmento|recap|resumen|reacci[óo]n|reaction|react\b|review|an[áa]lisis|best of|banda sonora|soundtrack|\bost\b|deleted|bonus|featurette|primeros \d+ min|twitch|donaci[óo]n|sub tier|\bbits\b|en vivo|en directo|\blive\b|\bstream\b|loquendo/i;
 
 async function mCinetimes(q) {
   if (q.type === 'tv') return [];
@@ -1077,7 +1077,7 @@ app.get('/multi', async (req, res) => {
     return res.status(400).json({ urls: [], error: 'src+title required' });
   }
   const keyTitle = (originalTitle || title).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/-+/g, '-');
-  const ckey = `multi7:${src}:${type || 'movie'}:${keyTitle}:${year || ''}:${season || ''}:${episode || ''}`;
+  const ckey = `multi8:${src}:${type || 'movie'}:${keyTitle}:${year || ''}:${season || ''}:${episode || ''}`;
   if (req.query.fresh !== '1') {
     const hit = await cacheGet(ckey);
     if (hit?.urls?.length) {
