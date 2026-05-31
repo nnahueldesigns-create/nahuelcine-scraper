@@ -79,15 +79,16 @@ function mMatchLen(toks, tw, ow) {
 }
 // Guarda contra secuelas: "Wayne's World" (query) NO debe matchear "Wayne's
 // World 2". Rechaza si el candidato trae un número suelto (2, II, etc.) que el
-// query no tiene. Años (4 dígitos) no cuentan.
+// query no tiene. OJO: los números van sobre los tokens CRUDOS del query
+// (mTokens, no mWords — mWords descarta "2" por corto y rompía el query "...2").
 const SEQ_NUM = w => /^\d{1,2}$/.test(w) || /^(ii|iii|iv|vi{0,3}|ix|xi{0,3})$/.test(w);
-function seqOk(toks, qUnion) {
-  const qn = qUnion.filter(SEQ_NUM);
-  return !toks.some(w => SEQ_NUM(w) && !qn.includes(w));
+const numsOf = s => mTokens(s).filter(SEQ_NUM);
+function seqOk(toks, allowedNums) {
+  return !toks.some(w => SEQ_NUM(w) && !allowedNums.includes(w));
 }
 // Mejor candidato: matchea (título u original completo); desempata por MENOS
 // palabras extra. Para títulos de 1 palabra, límite estricto (1 extra).
-function mBest(cands, tw, ow) {
+function mBest(cands, tw, ow, qNums = []) {
   const union = [...new Set([...tw, ...ow])];
   if (!union.length) return null;
   let best = null, bs = -1;
@@ -95,7 +96,7 @@ function mBest(cands, tw, ow) {
     const toks = mTokens(c);
     const mlen = mMatchLen(toks, tw, ow);
     if (!mlen) continue;
-    if (!seqOk(toks, union)) continue; // no matchear secuelas ("Movie 2")
+    if (!seqOk(toks, qNums)) continue; // no matchear secuelas ("Movie 2")
     const extra = mExtra(toks, union);
     if (extra > (mlen <= 1 ? 1 : 3)) continue;
     const sc = 1000 - extra;
@@ -123,10 +124,11 @@ async function mCinetimes(q) {
   if (q.type === 'tv') return [];
   const out = [];
   const tw = mWords(q.title), ow = mWords(q.originalTitle || '');
+  const qNums = [...new Set([...numsOf(q.title), ...numsOf(q.originalTitle || '')])];
   for (const [sec, lang] of [['es-lat', 'LAT'], ['es', 'ESP']]) {
     const sh = await mGetText(`https://cinetimes.org/${sec}/?s=${encodeURIComponent(q.title)}`, 'https://cinetimes.org/');
     const slugs = [...new Set([...sh.matchAll(new RegExp(`/${sec}/t/([a-z0-9-]+)`, 'gi'))].map(m => m[1]))];
-    const best = mBest(slugs, tw, ow);
+    const best = mBest(slugs, tw, ow, qNums);
     if (!best) continue;
     const ph = await mGetText(`https://cinetimes.org/${sec}/t/${best}`, `https://cinetimes.org/${sec}/`);
     const m = ph.match(/src="(https:\/\/www\.youtube\.com\/embed\/[^"]+|https:\/\/archive\.org\/embed\/[^"]+|https:\/\/[^"]*dailymotion[^"]+)"/i);
@@ -183,9 +185,10 @@ async function mPelicinehd(q) {
   // pelicinehd = estrenos modernos; una peli vieja no está → evita match basura.
   if (q.year && parseInt(q.year, 10) < 2000) return [];
   const tw = mWords(q.title), ow = mWords(q.originalTitle || '');
+  const qNums = [...new Set([...numsOf(q.title), ...numsOf(q.originalTitle || '')])];
   const sh = await mGetText(`https://pelicinehd.com/?s=${encodeURIComponent(q.title)}`, 'https://pelicinehd.com/');
   const slugs = [...new Set([...sh.matchAll(/\/movies\/([a-z0-9-]+)\//gi)].map(m => m[1]))];
-  const best = mBest(slugs, tw, ow);
+  const best = mBest(slugs, tw, ow, qNums);
   if (!best) return [];
   const page = `https://pelicinehd.com/movies/${best}/`;
   const ph = await mGetText(page, 'https://pelicinehd.com/');
@@ -270,19 +273,26 @@ async function mOkru(q) {
   }
   // Mejor match: título u original completo en el resultado; bonus por año.
   const wantY = q.year ? parseInt(q.year, 10) : null;
+  const qNums = [...new Set([...numsOf(q.title), ...numsOf(q.originalTitle || '')])];
   let best = null, bs = -1;
   for (const r of results) {
     const toks = mTokens(r.title);
-    if (!mMatchLen(toks, tw, ow)) continue;
-    if (!seqOk(toks, union)) continue; // no matchear secuelas ("Wayne's World 2")
+    const mlen = mMatchLen(toks, tw, ow);
+    if (!mlen) continue;
+    if (!seqOk(toks, qNums)) continue; // no matchear secuelas ("Wayne's World 2")
     // Descartar clips/fragmentos/extras (no la peli completa): "Extreme
     // close-up", trailer, escena, detrás de escena, bloopers, reacción, etc.
     if (OKRU_CLIP.test(r.title)) continue;
+    // Cap de palabras extra: para títulos de 1 palabra común ("Colonia"),
+    // rechazar resultados con mucho relleno (ej. "Copiii bionici Colonia
+    // spațială partea a doua" = serie rumana). ok.ru suele traer "ok"/"ru".
+    const extra = mExtra(toks, union);
+    if (extra > (mlen <= 1 ? 2 : 5)) continue;
     // Year-gate: si el título trae un año y NO coincide (±1) con el pedido,
     // descartar (homónima de otro año, ej. "Colonia 2015" vs pedido 2008).
     const ym = r.title.match(/\b(19\d\d|20\d\d)\b/);
     if (wantY && ym && Math.abs(parseInt(ym[1], 10) - wantY) > 1) continue;
-    let sc = 10 - mExtra(toks, union) * 0.1;
+    let sc = 10 - extra * 0.1;
     if (wantY && ym && Math.abs(parseInt(ym[1], 10) - wantY) <= 1) sc += 5; // año correcto = preferido
     if (sc > bs) { bs = sc; best = r; }
   }
@@ -1054,7 +1064,7 @@ app.get('/multi', async (req, res) => {
     return res.status(400).json({ urls: [], error: 'src+title required' });
   }
   const keyTitle = (originalTitle || title).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/-+/g, '-');
-  const ckey = `multi5:${src}:${type || 'movie'}:${keyTitle}:${year || ''}:${season || ''}:${episode || ''}`;
+  const ckey = `multi6:${src}:${type || 'movie'}:${keyTitle}:${year || ''}:${season || ''}:${episode || ''}`;
   if (req.query.fresh !== '1') {
     const hit = await cacheGet(ckey);
     if (hit?.urls?.length) {
