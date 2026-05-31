@@ -263,41 +263,54 @@ async function mOkru(q) {
   const tw = mWords(q.title), ow = mWords(q.originalTitle || '');
   const union = [...new Set([...tw, ...ow])];
   if (!union.length) return [];
-  // Probar título y, si no hay, título original. El año NO va en la búsqueda
-  // (muchos uploads no lo ponen) — se usa sólo para puntuar el match.
-  const terms = [...new Set([q.title, q.originalTitle].filter(Boolean))];
+  const wantY = q.year ? parseInt(q.year, 10) : null;
+  const qNums = [...new Set([...numsOf(q.title), ...numsOf(q.originalTitle || '')])];
+
+  // Puntúa un resultado (null si no califica). Prefiere audio español:
+  // latino/castellano >> neutro >> inglés, para no mostrar la versión inglesa
+  // cuando hay una doblada en ok.ru.
+  const score = (r) => {
+    const toks = mTokens(r.title);
+    const mlen = mMatchLen(toks, tw, ow);
+    if (!mlen) return null;
+    if (!seqOk(toks, qNums)) return null;        // no secuelas
+    if (OKRU_CLIP.test(r.title)) return null;    // no clips/extras
+    const extra = mExtra(toks, union);
+    if (extra > (mlen <= 1 ? 2 : 5)) return null; // no relleno (1-palabra estricto)
+    const ym = r.title.match(/\b(19\d\d|20\d\d)\b/);
+    if (wantY && ym && Math.abs(parseInt(ym[1], 10) - wantY) > 1) return null; // year-gate
+    let sc = 5 - extra * 0.1;
+    if (wantY && ym && Math.abs(parseInt(ym[1], 10) - wantY) <= 1) sc += 3;
+    const lg = mLang(r.title);
+    if (lg === 'LAT') sc += 12; else if (lg === 'ESP') sc += 10; else if (lg === 'SUB') sc += 6;
+    else if (lg === 'ENG') sc -= 4; // null = neutro (sin bonus ni penalización)
+    return { sc, lang: lg };
+  };
+  const pickBest = (results) => {
+    let best = null, bs = -1, bl = null;
+    for (const r of results) { const s = score(r); if (s && s.sc > bs) { bs = s.sc; best = r; bl = s.lang; } }
+    return best ? { r: best, lang: bl } : null;
+  };
+
+  // 1) búsqueda normal (título; si vacío, original).
   let results = [];
-  for (const t of terms) {
+  for (const t of [...new Set([q.title, q.originalTitle].filter(Boolean))]) {
     results = await okruSearch(t);
     if (results.length) break;
   }
-  // Mejor match: título u original completo en el resultado; bonus por año.
-  const wantY = q.year ? parseInt(q.year, 10) : null;
-  const qNums = [...new Set([...numsOf(q.title), ...numsOf(q.originalTitle || '')])];
-  let best = null, bs = -1;
-  for (const r of results) {
-    const toks = mTokens(r.title);
-    const mlen = mMatchLen(toks, tw, ow);
-    if (!mlen) continue;
-    if (!seqOk(toks, qNums)) continue; // no matchear secuelas ("Wayne's World 2")
-    // Descartar clips/fragmentos/extras (no la peli completa): "Extreme
-    // close-up", trailer, escena, detrás de escena, bloopers, reacción, etc.
-    if (OKRU_CLIP.test(r.title)) continue;
-    // Cap de palabras extra: para títulos de 1 palabra común ("Colonia"),
-    // rechazar resultados con mucho relleno (ej. "Copiii bionici Colonia
-    // spațială partea a doua" = serie rumana). ok.ru suele traer "ok"/"ru".
-    const extra = mExtra(toks, union);
-    if (extra > (mlen <= 1 ? 2 : 5)) continue;
-    // Year-gate: si el título trae un año y NO coincide (±1) con el pedido,
-    // descartar (homónima de otro año, ej. "Colonia 2015" vs pedido 2008).
-    const ym = r.title.match(/\b(19\d\d|20\d\d)\b/);
-    if (wantY && ym && Math.abs(parseInt(ym[1], 10) - wantY) > 1) continue;
-    let sc = 10 - extra * 0.1;
-    if (wantY && ym && Math.abs(parseInt(ym[1], 10) - wantY) <= 1) sc += 5; // año correcto = preferido
-    if (sc > bs) { bs = sc; best = r; }
+  let picked = pickBest(results);
+
+  // 2) si el mejor no es claramente español, buscar la versión doblada
+  //    (`{título} latino`). Solo 1 query extra y solo cuando hace falta.
+  if (!picked || picked.lang === 'ENG' || picked.lang === null) {
+    const sp = await okruSearch(`${q.title} latino`);
+    const picked2 = pickBest([...sp, ...results]);
+    if (picked2 && (picked2.lang === 'LAT' || picked2.lang === 'ESP' || picked2.lang === 'SUB')) picked = picked2;
+    else if (!picked && picked2) picked = picked2;
   }
-  if (!best) return [];
-  return [{ url: `https://ok.ru/videoembed/${best.id}`, lang: null }];
+
+  if (!picked) return [];
+  return [{ url: `https://ok.ru/videoembed/${picked.r.id}`, lang: picked.lang || null }];
 }
 
 // retinalatina removida: geo-bloquea AR/UY (target) → embeds en negro. El
@@ -1064,7 +1077,7 @@ app.get('/multi', async (req, res) => {
     return res.status(400).json({ urls: [], error: 'src+title required' });
   }
   const keyTitle = (originalTitle || title).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/-+/g, '-');
-  const ckey = `multi6:${src}:${type || 'movie'}:${keyTitle}:${year || ''}:${season || ''}:${episode || ''}`;
+  const ckey = `multi7:${src}:${type || 'movie'}:${keyTitle}:${year || ''}:${season || ''}:${episode || ''}`;
   if (req.query.fresh !== '1') {
     const hit = await cacheGet(ckey);
     if (hit?.urls?.length) {
