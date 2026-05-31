@@ -340,7 +340,7 @@ const CACHE_ON    = !!(REDIS_URL && REDIS_TOKEN);
 console.log(`[cache] ${CACHE_ON ? 'ON (Upstash)' : 'OFF (sin env vars)'} ttl=${CACHE_TTL}s`);
 
 function cacheKey(q) {
-  return 'scrape6:' + [q.url || q.searchUrl || '', q.season || '', q.episode || '', q.sectionFilter || '', q.titleSlug || '', q.year || ''].join('|');
+  return 'scrape7:' + [q.url || q.searchUrl || '', q.season || '', q.episode || '', q.sectionFilter || '', q.titleSlug || '', q.year || ''].join('|');
 }
 
 async function cacheGet(key) {
@@ -697,7 +697,7 @@ app.get('/scrape', async (req, res) => {
     const siteParser =
       url.includes('cuevana.cz')                                ? { fn: parseCuevanaServers,    ref: 'https://cuevana.cz/',           sort: false, tag: 'cuevana'   } :
       url.includes('gnula')                                      ? { fn: parseGnulaServers,      ref: 'https://www2.gnula.one/',       sort: true,  tag: 'gnula'     } :
-      (url.includes('pelisplus') || url.includes('pelisplushd')) ? { fn: parsePelisplusServers,  ref: 'https://www.pelisplushd.la/',   sort: true,  tag: 'pelisplus' } :
+      (url.includes('pelisplus') || url.includes('pelisplushd')) ? { fn: parsePelisplusServers,  ref: 'https://www.pelisplushd.la/',   sort: true,  tag: 'pelisplus', trustOnly: true } :
       url.includes('doramasflix')                                ? { fn: parseDoramasflixServers, ref: 'https://doramasflix.in/',      sort: false, tag: 'doramasflix', skipPlaywright: true, timeout: 5000 } :
       null;
     if (siteParser) {
@@ -721,6 +721,14 @@ app.get('/scrape', async (req, res) => {
       }
       if (siteParser.skipPlaywright) {
         console.log(`[http-fast/${siteParser.tag}] 0 server(s), skip Playwright`);
+        return emitServers(res, ckey, [], streamMode);
+      }
+      // trustOnly (pelisplus): si la página cargó OK pero el parser data-name dio 0,
+      // NO caer al extractor genérico — agarra hosts muertos (uqload/upstream/dood)
+      // SIN idioma. Mejor [] (cuevana/ok.ru cubren). Sólo si NO cargó la página
+      // (cloudflare/timeout) seguimos a Playwright (búsqueda por search).
+      if (siteParser.trustOnly && okHtml) {
+        console.log(`[http-fast/${siteParser.tag}] 0 server(s) en página válida → [] (no genérico)`);
         return emitServers(res, ckey, [], streamMode);
       }
     }
@@ -926,6 +934,12 @@ app.get('/scrape', async (req, res) => {
     const isGnulaPage      = targetUrl.includes('gnula');
     const isPelisplusPage  = targetUrl.includes('pelisplus') || targetUrl.includes('pelisplushd');
     const isParsedSite     = isCuevanaPage || isGnulaPage || isPelisplusPage;
+    // Pelisplus: el parser data-name es la ÚNICA fuente fiable (con idioma). Si la
+    // página no tiene esa estructura (slug viejo/JS), el fallback genérico agarra
+    // hosts muertos (uqload/upstream/dood) SIN idioma → botones rotos sin etiqueta.
+    // Mejor devolver [] y dejar que cuevana/ok.ru cubran. Cuevana NO entra acá:
+    // tiene su propio fallback de clicks (data-server) que sí funciona.
+    const trustParserOnly  = isPelisplusPage || isGnulaPage;
 
     // YEAR-GATE (ruta search/Playwright): el search puede caer en una homónima de
     // otro año (ej. "El baño del Papa" → otro film). Si la página tiene año y no
@@ -984,7 +998,7 @@ app.get('/scrape', async (req, res) => {
     }
 
     // Non-cuevana or cuevana fallback: data-server based approach
-    if (!urls.size) {
+    if (!urls.size && !trustParserOnly) {
       const cuevanaServerEls = await page.$$('[data-server*="video.cuevana.cz"]');
       if (cuevanaServerEls.length > 0) {
         const toClick = cuevanaServerEls.slice(0, 3);
@@ -1008,7 +1022,7 @@ app.get('/scrape', async (req, res) => {
       }
     }
 
-    if (!urls.size) {
+    if (!urls.size && !trustParserOnly) {
       await page.waitForFunction((domains) => {
         return [...document.querySelectorAll('iframe')].some(f => {
           const src = f.getAttribute('src') || '';
@@ -1025,13 +1039,13 @@ app.get('/scrape', async (req, res) => {
     // URLs de red: sólo si NO es un sitio con parser propio, o si el parser no
     // devolvió nada. Para sitios parseados con servers ya cargados, agregar URLs
     // de red (sin idioma) ensuciaría los botones con servers sin etiqueta.
-    if (!isParsedSite || !urls.size) {
+    if (!trustParserOnly && (!isParsedSite || !urls.size)) {
       const innerNetworkUrls = [...networkUrls].filter(u => INNER_PLAYER_DOMAINS.some(d => u.includes(d)));
       const cuevanaNetworkUrls = [...networkUrls].filter(u => u.includes('video.cuevana.cz'));
       for (const u of (innerNetworkUrls.length ? innerNetworkUrls : cuevanaNetworkUrls)) urls.add(u);
     }
 
-    if (!urls.size) {
+    if (!urls.size && !trustParserOnly) {
       const html = await page.content();
       for (const u of extractFromHtml(html)) {
         if (!/\.js(\?|$)/.test(u) && !/\.css(\?|$)/.test(u)) urls.add(u);
