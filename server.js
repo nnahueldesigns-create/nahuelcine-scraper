@@ -77,6 +77,14 @@ function mMatchLen(toks, tw, ow) {
   if (mAllIn(toks, ow)) return ow.length;
   return 0;
 }
+// Guarda contra secuelas: "Wayne's World" (query) NO debe matchear "Wayne's
+// World 2". Rechaza si el candidato trae un número suelto (2, II, etc.) que el
+// query no tiene. Años (4 dígitos) no cuentan.
+const SEQ_NUM = w => /^\d{1,2}$/.test(w) || /^(ii|iii|iv|vi{0,3}|ix|xi{0,3})$/.test(w);
+function seqOk(toks, qUnion) {
+  const qn = qUnion.filter(SEQ_NUM);
+  return !toks.some(w => SEQ_NUM(w) && !qn.includes(w));
+}
 // Mejor candidato: matchea (título u original completo); desempata por MENOS
 // palabras extra. Para títulos de 1 palabra, límite estricto (1 extra).
 function mBest(cands, tw, ow) {
@@ -87,6 +95,7 @@ function mBest(cands, tw, ow) {
     const toks = mTokens(c);
     const mlen = mMatchLen(toks, tw, ow);
     if (!mlen) continue;
+    if (!seqOk(toks, union)) continue; // no matchear secuelas ("Movie 2")
     const extra = mExtra(toks, union);
     if (extra > (mlen <= 1 ? 1 : 3)) continue;
     const sc = 1000 - extra;
@@ -106,6 +115,9 @@ function extractPageYear(html) {
   return null;
 }
 const M_ARCHIVE_JUNK = /review|commentary|trailer|demo|sample|clip|reaction|\bfan\b|behind|making|presents|interview|soundtrack|score|\bmix\b|podcast|episode \d|part \d/i;
+// Títulos de ok.ru que NO son la peli completa (clips/extras/promo). Si aparecen
+// se descarta el resultado, ej. "Wayne's World (1992) Extreme close-up".
+const OKRU_CLIP = /close[\s-]?up|trailer|te[áa]ser|\bclip\b|\bescena\b|\bscene\b|detr[áa]s|behind the scene|making of|c[óo]mo se hizo|blooper|gag reel|fragmento|recap|resumen|reacci[óo]n|reaction|review|an[áa]lisis|best of|banda sonora|soundtrack|\bost\b|deleted|bonus|featurette|primeros \d+ min/i;
 
 async function mCinetimes(q) {
   if (q.type === 'tv') return [];
@@ -262,6 +274,10 @@ async function mOkru(q) {
   for (const r of results) {
     const toks = mTokens(r.title);
     if (!mMatchLen(toks, tw, ow)) continue;
+    if (!seqOk(toks, union)) continue; // no matchear secuelas ("Wayne's World 2")
+    // Descartar clips/fragmentos/extras (no la peli completa): "Extreme
+    // close-up", trailer, escena, detrás de escena, bloopers, reacción, etc.
+    if (OKRU_CLIP.test(r.title)) continue;
     // Year-gate: si el título trae un año y NO coincide (±1) con el pedido,
     // descartar (homónima de otro año, ej. "Colonia 2015" vs pedido 2008).
     const ym = r.title.match(/\b(19\d\d|20\d\d)\b/);
@@ -1038,7 +1054,7 @@ app.get('/multi', async (req, res) => {
     return res.status(400).json({ urls: [], error: 'src+title required' });
   }
   const keyTitle = (originalTitle || title).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/-+/g, '-');
-  const ckey = `multi4:${src}:${type || 'movie'}:${keyTitle}:${year || ''}:${season || ''}:${episode || ''}`;
+  const ckey = `multi5:${src}:${type || 'movie'}:${keyTitle}:${year || ''}:${season || ''}:${episode || ''}`;
   if (req.query.fresh !== '1') {
     const hit = await cacheGet(ckey);
     if (hit?.urls?.length) {
